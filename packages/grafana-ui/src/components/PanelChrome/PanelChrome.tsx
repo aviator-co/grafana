@@ -560,6 +560,9 @@ const getStyles = (theme: GrafanaTheme2) => {
       backgroundImage: accentStripe,
       backgroundRepeat: 'no-repeat',
       backgroundSize: '100% 6px',
+      // Reserve the stripe's height above the header. The header is the first flow
+      // child and paints its own background, which would otherwise cover the stripe.
+      paddingTop: '6px',
       border: `2px solid ${theme.colors.primary.border}`,
       boxShadow: theme.shadows.z2,
       position: 'unset',
