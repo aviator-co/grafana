@@ -11,31 +11,36 @@ const (
 	// are negative to ensure that the default items are placed above
 	// any items with default weight.
 
-	WeightHome = (iota - 40) * 100
-	WeightBookmarks
-	WeightSavedItems
-	WeightDashboard
-	WeightExplore
-	WeightDrilldown
-	WeightAssistant
-	WeightSigil
-	WeightAlerting
-	WeightAlertsAndIncidents
-	WeightAIAndML
-	WeightAdaptiveTelemetry
-	WeightCMAB
-	WeightTestingAndSynthetics
-	WeightObservability
-	WeightCloudServiceProviders
-	WeightInfrastructure
-	WeightApplication
-	WeightAsserts
-	WeightDataConnections
-	WeightApps
-	WeightPlugin
-	WeightConfig
-	WeightProfile
-	WeightHelp
+	WeightHome = -4000
+
+	// Alphabetical order for the eight main user-visible top-level nav items
+	WeightConfig          = -3900 // Administration
+	WeightAlerting        = -3800
+	WeightBookmarks       = -3700
+	WeightDataConnections = -3600 // Connections
+	WeightDashboard       = -3500
+	WeightDrilldown       = -3400
+	WeightExplore         = -3300
+	WeightSavedItems      = -3200 // Starred
+
+	// Enterprise / plugin items
+	WeightAssistant             = -3100
+	WeightSigil                 = -3000
+	WeightAlertsAndIncidents    = -2900
+	WeightAIAndML               = -2800
+	WeightAdaptiveTelemetry     = -2700
+	WeightCMAB                  = -2600
+	WeightTestingAndSynthetics  = -2500
+	WeightObservability         = -2400
+	WeightCloudServiceProviders = -2300
+	WeightInfrastructure        = -2200
+	WeightApplication           = -2100
+	WeightAsserts               = -2000
+	WeightApps                  = -1900
+	WeightPlugin                = -1800
+
+	WeightProfile = -700
+	WeightHelp    = -100
 )
 
 const (
