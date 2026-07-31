@@ -2,7 +2,7 @@ import { createDataFrame, FieldType, getPanelDataSummary, PanelPlugin, standardE
 import { TableCellDisplayMode } from '@grafana/schema';
 import { getAllOptionEditors } from 'app/core/components/OptionsUI/registry';
 
-import { TablePanel } from './TablePanel';
+import { TablePieView } from './TablePieView';
 import { tableMigrationHandler, tablePanelChangedHandler } from './migrations';
 import { plugin } from './module';
 import { tableSuggestionsSupplier } from './suggestions';
@@ -21,9 +21,9 @@ function customConfigItem(path: string) {
 }
 
 describe('table module', () => {
-  it('exports a PanelPlugin rendering TablePanel', () => {
+  it('exports a PanelPlugin rendering the table and pie composite view', () => {
     expect(plugin).toBeInstanceOf(PanelPlugin);
-    expect(plugin.panel).toBe(TablePanel);
+    expect(plugin.panel).toBe(TablePieView);
   });
 
   it('wires up the migration and panel-change handlers', () => {
