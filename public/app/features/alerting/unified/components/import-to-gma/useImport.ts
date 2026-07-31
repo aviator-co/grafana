@@ -1,13 +1,16 @@
 import { load } from 'js-yaml';
-import { useCallback, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 
-import { RulerRulesConfigDTO } from 'app/types/unified-alerting-dto';
+import { isDefaultRoutingTreeName } from '@grafana/alerting';
+import { t } from '@grafana/i18n';
+import { type RulerRulesConfigDTO } from 'app/types/unified-alerting-dto';
 
 import { fetchAlertManagerConfig } from '../../api/alertmanager';
 import { convertToGMAApi } from '../../api/convertToGMAApi';
 import { stringifyErrorLike } from '../../utils/misc';
 
-import type { ConvertAlertmanagerResponse, DryRunValidationResult } from './types';
+import { findDuplicateTemplateFileName } from './steps/utils';
+import type { ConvertAlertmanagerResponse, DryRunValidationResult, MergeStats, PromoteStatsSummary } from './types';
 
 interface ParsedAlertmanagerYaml {
   alertmanagerConfig: string;
@@ -35,7 +38,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  *
  * This function extracts `template_files` and re-serializes the remaining config as JSON.
  */
-export function parseAlertmanagerYaml(yamlContent: string): ParsedAlertmanagerYaml {
+function parseAlertmanagerYaml(yamlContent: string): ParsedAlertmanagerYaml {
   let parsed: unknown;
   try {
     parsed = load(yamlContent);
@@ -61,8 +64,57 @@ interface NotificationsSourceParams {
   /** Datasource name (not UID) - required when source is 'datasource' */
   datasourceName?: string;
   yamlFile: File | null;
+  /**
+   * Separate notification template files uploaded alongside the YAML config.
+   * On disk users keep the Alertmanager config and template files separately (mimirtool combines
+   * them on the fly); the wizard reads these and merges them into the request's template_files map.
+   */
+  templateFiles?: File[];
   /** Configuration identifier - the name of the extra config (policy tree name) */
   configIdentifier: string;
+  /** If true, promote (merge) the imported config into the main Grafana config */
+  promote?: boolean;
+}
+
+/**
+ * Read uploaded notification template files into a { fileName: content } map, keyed by file name —
+ * matching how mimirtool and the convert API key `template_files` (and how Grafana names the
+ * resulting template groups). Throws if two files share the same name, since the key would be
+ * ambiguous.
+ */
+export async function readTemplateFiles(files: File[] = []): Promise<Record<string, string>> {
+  const duplicate = findDuplicateTemplateFileName(files);
+  if (duplicate) {
+    throw new Error(
+      t('alerting.import-to-gma.templates.duplicate-file-name', 'Duplicate template file name: "{{name}}"', {
+        name: duplicate,
+      })
+    );
+  }
+  const entries = await Promise.all(files.map(async (file) => [file.name, await file.text()] as const));
+  return Object.fromEntries(entries);
+}
+
+/**
+ * Merge separately-uploaded template files on top of any template_files already embedded in the
+ * config. A name that exists in both is ambiguous, so reject it rather than silently overwriting.
+ */
+export function mergeTemplateFiles(
+  embedded: Record<string, string>,
+  uploaded: Record<string, string>
+): Record<string, string> {
+  for (const name of Object.keys(uploaded)) {
+    if (name in embedded) {
+      throw new Error(
+        t(
+          'alerting.import-to-gma.templates.conflicts-with-config',
+          'Template file "{{name}}" conflicts with a template already defined in the config',
+          { name }
+        )
+      );
+    }
+  }
+  return { ...embedded, ...uploaded };
 }
 
 /**
@@ -70,11 +122,17 @@ interface NotificationsSourceParams {
  * Shared between import and dry-run flows.
  */
 async function resolveAlertmanagerConfig(params: NotificationsSourceParams): Promise<ParsedAlertmanagerYaml> {
-  const { source, datasourceName, yamlFile } = params;
+  const { source, datasourceName, yamlFile, templateFiles } = params;
 
   if (source === 'yaml' && yamlFile) {
     const yamlContent = await yamlFile.text();
-    return parseAlertmanagerYaml(yamlContent);
+    const parsed = parseAlertmanagerYaml(yamlContent);
+    const uploadedTemplates = await readTemplateFiles(templateFiles);
+
+    return {
+      alertmanagerConfig: parsed.alertmanagerConfig,
+      templateFiles: mergeTemplateFiles(parsed.templateFiles, uploadedTemplates),
+    };
   }
 
   if (source === 'datasource' && datasourceName) {
@@ -88,15 +146,25 @@ async function resolveAlertmanagerConfig(params: NotificationsSourceParams): Pro
   throw new Error('Invalid import source configuration');
 }
 
-interface MigrateRulesParams {
+interface MigrateRulesBaseParams {
   dataSourceUID: string;
   targetFolderUID?: string;
   pauseAlertingRules: boolean;
   pauseRecordingRules: boolean;
   payload: RulerRulesConfigDTO;
   targetDatasourceUID?: string;
-  /** Extra labels to add to all imported rules (format: key=value,key2=value2) */
-  extraLabels?: string;
+}
+
+type MigrateRulesParams = MigrateRulesBaseParams & { notificationSettings?: string };
+
+export function buildRoutingParams(
+  selectedRoutingTreeName: string | undefined
+): Pick<MigrateRulesParams, 'notificationSettings'> {
+  return {
+    notificationSettings: isDefaultRoutingTreeName(selectedRoutingTreeName)
+      ? undefined
+      : JSON.stringify({ policy: selectedRoutingTreeName }),
+  };
 }
 
 /**
@@ -110,11 +178,12 @@ export function useImportNotifications() {
     async (params: NotificationsSourceParams) => {
       const { alertmanagerConfig, templateFiles } = await resolveAlertmanagerConfig(params);
 
-      await convertAlertmanagerConfig({
+      return await convertAlertmanagerConfig({
         alertmanagerConfig,
         templateFiles,
         configIdentifier: params.configIdentifier,
         forceReplace: true,
+        promote: params.promote,
       }).unwrap();
     },
     [convertAlertmanagerConfig]
@@ -137,7 +206,7 @@ export function useImportRules() {
         pauseRecordingRules,
         payload,
         targetDatasourceUID,
-        extraLabels,
+        notificationSettings,
       } = params;
 
       await convert({
@@ -147,7 +216,7 @@ export function useImportRules() {
         pauseAlerts: pauseAlertingRules,
         payload,
         targetDatasourceUID,
-        extraLabels,
+        notificationSettings,
       }).unwrap();
     },
     [convert]
@@ -225,9 +294,23 @@ function isRuleManagedByExternalSystem(rule: { labels?: Record<string, string> }
 }
 
 /**
+ * Summarize the per-type merge stats from a promote (dry-run or real) into counts
+ * for display on the review screen.
+ */
+export function summarizeMergeStats(stats: MergeStats | undefined): PromoteStatsSummary {
+  return {
+    route: Boolean(stats?.added_route),
+    receivers: stats?.added_receivers?.length ?? 0,
+    templates: stats?.added_templates?.length ?? 0,
+    timeIntervals: stats?.added_time_intervals?.length ?? 0,
+    inhibitionRules: stats?.added_inhibition_rules?.length ?? 0,
+  };
+}
+
+/**
  * Parse the backend ConvertAlertmanagerResponse into a UI-friendly DryRunValidationResult.
  */
-function parseDryRunResponse(response: ConvertAlertmanagerResponse): DryRunValidationResult {
+export function parseDryRunResponse(response: ConvertAlertmanagerResponse): DryRunValidationResult {
   const renamedReceivers = Object.entries(response.rename_resources?.receivers ?? {}).map(
     ([originalName, newName]) => ({ originalName, newName })
   );
@@ -240,7 +323,27 @@ function parseDryRunResponse(response: ConvertAlertmanagerResponse): DryRunValid
     error: response.error,
     renamedReceivers,
     renamedTimeIntervals,
+    stats: response.stats ? summarizeMergeStats(response.stats) : undefined,
   };
+}
+
+/**
+ * Combine the dry-run mutation's cached data with any error into a single UI result.
+ * A pre-run failure (e.g. a template conflict) sets an error while the previous
+ * successful response is still cached, so the error must take precedence over the
+ * stale data — otherwise the review step would report the config as ready to import.
+ */
+export function deriveDryRunResult(
+  dryRunData: DryRunValidationResult | undefined,
+  dryRunError: string | undefined
+): DryRunValidationResult | undefined {
+  if (dryRunError) {
+    return { valid: false, error: dryRunError, renamedReceivers: [], renamedTimeIntervals: [], stats: undefined };
+  }
+  if (dryRunData) {
+    return dryRunData;
+  }
+  return undefined;
 }
 
 /**
@@ -249,7 +352,7 @@ function parseDryRunResponse(response: ConvertAlertmanagerResponse): DryRunValid
  * Validates the config and checks for conflicts without saving.
  */
 export function useDryRunNotifications() {
-  const [dryRunAlertmanagerConfig, { isLoading, data, error: mutationError }] =
+  const [dryRunAlertmanagerConfig, { isLoading, data, error: mutationError, reset: resetMutation }] =
     convertToGMAApi.useDryRunAlertmanagerConfigMutation();
   const [preRunError, setPreRunError] = useState<string>();
 
@@ -262,6 +365,7 @@ export function useDryRunNotifications() {
           alertmanagerConfig,
           templateFiles,
           configIdentifier: params.configIdentifier,
+          promote: params.promote,
         });
       } catch (err) {
         setPreRunError(stringifyErrorLike(err));
@@ -270,8 +374,24 @@ export function useDryRunNotifications() {
     [dryRunAlertmanagerConfig]
   );
 
-  const result = data ? parseDryRunResponse(data) : undefined;
-  const error = mutationError ? stringifyErrorLike(mutationError) : preRunError;
+  // RTK recreates the mutation's `reset` on every trigger (its identity tracks the in-flight request),
+  // so keep the latest in a ref and expose a stable `reset`. Callers use it as an effect dependency
+  // (Step 1 trigger effect); an unstable identity would re-fire that effect and loop dry-runs forever.
+  const resetMutationRef = useRef(resetMutation);
+  resetMutationRef.current = resetMutation;
 
-  return { runDryRun, isLoading, result, error };
+  // Clear the cached response and any pre-run error so `result` returns to undefined. Called when the
+  // step is no longer runnable (e.g. a duplicate template name) so a previously successful dry-run
+  // can't keep reporting the config as valid once the inputs have become invalid.
+  const reset = useCallback(() => {
+    setPreRunError(undefined);
+    resetMutationRef.current();
+  }, []);
+
+  const parsed = useMemo(() => (data ? parseDryRunResponse(data) : undefined), [data]);
+  const error = mutationError ? stringifyErrorLike(mutationError) : preRunError;
+  // Combine data and error here (error wins) so callers consume a single ready-to-use result.
+  const result = useMemo(() => deriveDryRunResult(parsed, error), [parsed, error]);
+
+  return { runDryRun, reset, isLoading, result, error };
 }

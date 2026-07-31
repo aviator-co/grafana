@@ -285,7 +285,7 @@ func convertTransformation_V2alpha1_to_V2beta1(in *dashv2alpha1.DashboardTransfo
 	out.Kind = in.Kind
 	out.Spec.Id = in.Spec.Id
 	out.Spec.Disabled = in.Spec.Disabled
-	out.Spec.Filter = (*dashv2beta1.DashboardMatcherConfig)(in.Spec.Filter)
+	out.Spec.Filter = convertMatcherConfigPtr_V2alpha1_to_V2beta1(in.Spec.Filter)
 	out.Spec.Topic = (*dashv2beta1.DashboardDataTopic)(in.Spec.Topic)
 	out.Spec.Options = in.Spec.Options
 }
@@ -294,6 +294,7 @@ func convertQueryOptions_V2alpha1_to_V2beta1(in *dashv2alpha1.DashboardQueryOpti
 	out.TimeFrom = in.TimeFrom
 	out.MaxDataPoints = in.MaxDataPoints
 	out.TimeShift = in.TimeShift
+	out.TimeCompare = in.TimeCompare
 	out.QueryCachingTTL = in.QueryCachingTTL
 	out.Interval = in.Interval
 	out.CacheTimeout = in.CacheTimeout
@@ -354,8 +355,9 @@ func convertFieldConfig_V2alpha1_to_V2beta1(in *dashv2alpha1.DashboardFieldConfi
 		for i, step := range in.Thresholds.Steps {
 			// Convert threshold values: preserve null values from v2alpha1
 			out.Thresholds.Steps[i] = dashv2beta1.DashboardThreshold{
-				Value: step.Value,
-				Color: step.Color,
+				Value:     step.Value,
+				ValueExpr: step.ValueExpr,
+				Color:     step.Color,
 			}
 		}
 	}
@@ -378,13 +380,29 @@ func convertFieldConfig_V2alpha1_to_V2beta1(in *dashv2alpha1.DashboardFieldConfi
 	}
 }
 
+func convertMatcherScopePtr_V2alpha1_to_V2beta1(in *dashv2alpha1.DashboardMatcherScope) *dashv2beta1.DashboardMatcherScope {
+	if in == nil {
+		return nil
+	}
+	s := dashv2beta1.DashboardMatcherScope(*in)
+	return &s
+}
+
+func convertMatcherConfigPtr_V2alpha1_to_V2beta1(in *dashv2alpha1.DashboardMatcherConfig) *dashv2beta1.DashboardMatcherConfig {
+	if in == nil {
+		return nil
+	}
+	return &dashv2beta1.DashboardMatcherConfig{
+		Id:      in.Id,
+		Scope:   convertMatcherScopePtr_V2alpha1_to_V2beta1(in.Scope),
+		Options: in.Options,
+	}
+}
+
 func convertFieldConfigOverride_V2alpha1_to_V2beta1(in *dashv2alpha1.DashboardV2alpha1FieldConfigSourceOverrides, out *dashv2beta1.DashboardV2beta1FieldConfigSourceOverrides) {
 	out.SystemRef = in.SystemRef
 
-	out.Matcher = dashv2beta1.DashboardMatcherConfig{
-		Id:      in.Matcher.Id,
-		Options: in.Matcher.Options,
-	}
+	out.Matcher = *convertMatcherConfigPtr_V2alpha1_to_V2beta1(&in.Matcher)
 
 	out.Properties = make([]dashv2beta1.DashboardDynamicConfigValue, len(in.Properties))
 	for i, prop := range in.Properties {
@@ -769,6 +787,7 @@ func convertVariable_V2alpha1_to_V2beta1(in *dashv2alpha1.DashboardVariableKind,
 				SkipUrlSync:      in.AdhocVariableKind.Spec.SkipUrlSync,
 				Description:      in.AdhocVariableKind.Spec.Description,
 				AllowCustomValue: in.AdhocVariableKind.Spec.AllowCustomValue,
+				EnableGroupBy:    in.AdhocVariableKind.Spec.EnableGroupBy,
 			},
 		}
 	}

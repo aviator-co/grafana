@@ -17,14 +17,15 @@ import { memo, useEffect, useMemo, useState } from 'react';
 import * as React from 'react';
 
 import {
-  CoreApp,
-  TraceSearchProps,
-  DataFrame,
+  type CoreApp,
+  type TraceSearchProps,
+  type DataFrame,
   dateTimeFormat,
   dateTimeFormatTimeAgo,
-  GrafanaTheme2,
+  type GrafanaTheme2,
   PluginExtensionPoints,
 } from '@grafana/data';
+import { selectors } from '@grafana/e2e-selectors';
 import { Trans, t } from '@grafana/i18n';
 import {
   reportInteraction,
@@ -34,10 +35,10 @@ import {
   config,
 } from '@grafana/runtime';
 import { AdHocFiltersComboboxRenderer } from '@grafana/scenes';
-import { TimeZone } from '@grafana/schema';
+import { type TimeZone } from '@grafana/schema';
 import {
   Badge,
-  BadgeColor,
+  type BadgeColor,
   Button,
   ButtonGroup,
   CollapsableSection,
@@ -53,10 +54,15 @@ import {
 import { useAppNotification } from 'app/core/copy/appNotification';
 
 import { downloadTraceAsJson } from '../../../../inspector/utils/download';
-import { ViewRangeTimeUpdate, TUpdateViewRangeTimeFunction, ViewRange } from '../TraceTimelineViewer/types';
+import {
+  type ViewRangeTimeUpdate,
+  type TUpdateViewRangeTimeFunction,
+  type ViewRange,
+} from '../TraceTimelineViewer/types';
 import { getHeaderTags, getTraceName } from '../model/trace-viewer';
-import { Trace, TraceViewPluginExtensionContext } from '../types/trace';
+import { type Trace, type TraceViewPluginExtensionContext } from '../types/trace';
 import { formatDuration } from '../utils/date';
+import { getServiceColorKey } from '../utils/service-name';
 
 import TracePageSearchBar from './SearchBar/TracePageSearchBar';
 import SpanGraph from './SpanGraph';
@@ -142,8 +148,9 @@ export const TracePageHeader = memo((props: TracePageHeaderProps) => {
   });
 
   // Memoize service count to avoid recomputing on every render
+  // Uses getServiceColorKey to count namespace/serviceName pairs as distinct services
   const serviceCount = useMemo(() => {
-    return new Set(trace?.spans.map((span) => span.process?.serviceName)).size;
+    return new Set(trace?.spans.map((span) => (span.process ? getServiceColorKey(span.process) : ''))).size;
   }, [trace?.spans]);
 
   if (!trace) {
@@ -399,7 +406,7 @@ export const TracePageHeader = memo((props: TracePageHeaderProps) => {
       {!hideHeaderDetails && (
         <div className={styles.filtersContainer}>
           <Label>{t('explore.trace-page-header.filters', 'Filters')}</Label>
-          <div className={styles.adhocFiltersRow}>
+          <div className={styles.adhocFiltersRow} data-testid={selectors.components.TraceViewer.filtersRow}>
             {controller && <AdHocFiltersComboboxRenderer controller={controller} />}
           </div>
           {trace && (

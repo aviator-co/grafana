@@ -4,10 +4,12 @@ import (
 	"context"
 	"sync"
 
+	"k8s.io/apimachinery/pkg/runtime/schema"
+
 	"github.com/grafana/grafana/pkg/infra/log"
+	"github.com/grafana/grafana/pkg/storage/unified/resource"
 	"github.com/grafana/grafana/pkg/storage/unified/resourcepb"
 	"github.com/grafana/grafana/pkg/util/xorm"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 // Validator interface validates migration results.
@@ -30,16 +32,27 @@ type ResourceInfo struct {
 	// LockTables are the legacy database tables to lock during migration.
 	// This must include every table the migrator reads from.
 	LockTables []string
+	// FloorVersion is the oldest apiVersion (version part only, e.g. "v1beta1") that may
+	// exist in unified storage for this resource. The served-version guard requires it to
+	// stay registered in the scheme, else migrated data still carrying it becomes unservable.
+	FloorVersion string
 }
 
 // MigrationDefinition defines a resource migration.
 // This is the public API for defining and registering migrations.
 type MigrationDefinition struct {
-	ID          string                                // Unique identifier for registry lookup (e.g., "folders-dashboards", "playlists")
-	MigrationID string                                // ID for the migration log table entry (e.g., "folders and dashboards migration")
-	Resources   []ResourceInfo                        // Resources to migrate together, with their lock tables
-	Migrators   map[schema.GroupResource]MigratorFunc // Direct migrator functions per resource
-	Validators  []ValidatorFactory                    // Validator factories (validators created lazily)
+	ID              string                                // Unique identifier for registry lookup (e.g., "folders-dashboards", "playlists")
+	MigrationID     string                                // ID for the migration log table entry (e.g., "folders and dashboards migration")
+	Resources       []ResourceInfo                        // Resources to migrate together, with their lock tables
+	Migrators       map[schema.GroupResource]MigratorFunc // Direct migrator functions per resource
+	Validators      []ValidatorFactory                    // Validator factories (validators created lazily)
+	RenameTables    []string                              // Legacy tables to rename with _legacy suffix after successful migration
+	SkipWhenMissing bool                                  // For fully migrated resources, the table may not exist at all
+	// ResourceGroupsFunc, when set, is called before opening the bulk stream to
+	// resolve the actual groups present in the namespace, replacing the static
+	// Resources list for stream pre-authorization. The ResourceClient is provided
+	// so implementations can also account for stale groups in unified storage.
+	ResourceGroupsFunc func(ctx context.Context, namespace string, client resource.ResourceClient) ([]schema.GroupResource, error)
 }
 
 // CreateValidators creates validators from the stored factory functions.
@@ -70,14 +83,20 @@ func (d MigrationDefinition) GetGroupResources() []schema.GroupResource {
 	return result
 }
 
-// GetLockTables returns the lock tables for a given GroupResource.
-func (d MigrationDefinition) GetLockTables(gr schema.GroupResource) []string {
-	for _, ri := range d.Resources {
-		if ri.GroupResource == gr {
-			return ri.LockTables
+// GetLockTables returns all lock tables across all resources in the definition.
+func (d MigrationDefinition) GetLockTables() []string {
+	tables := make([]string, 0, len(d.Resources))
+	seen := make(map[string]struct{})
+	for _, res := range d.Resources {
+		for _, table := range res.LockTables {
+			if _, ok := seen[table]; ok {
+				continue
+			}
+			seen[table] = struct{}{}
+			tables = append(tables, table)
 		}
 	}
-	return nil
+	return tables
 }
 
 // GetMigratorFunc returns the migrator function for a given resource.
@@ -145,18 +164,6 @@ func (r *MigrationRegistry) GetMigratorFunc(gr schema.GroupResource) MigratorFun
 	return nil
 }
 
-// GetLockTables returns the legacy table names for a resource, if registered.
-func (r *MigrationRegistry) GetLockTables(gr schema.GroupResource) []string {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	for _, def := range r.definitions {
-		if tables := def.GetLockTables(gr); len(tables) > 0 {
-			return tables
-		}
-	}
-	return nil
-}
-
 // HasResource checks if a resource is registered in any migration definition.
 func (r *MigrationRegistry) HasResource(gr schema.GroupResource) bool {
 	r.mu.RLock()
@@ -167,4 +174,18 @@ func (r *MigrationRegistry) HasResource(gr schema.GroupResource) bool {
 		}
 	}
 	return false
+}
+
+// GetResourceGroupsFunc returns the ResourceGroupsFunc for the definition that
+// covers the given resource, or nil if none is registered or the definition has
+// no dynamic resolver.
+func (r *MigrationRegistry) GetResourceGroupsFunc(gr schema.GroupResource) func(ctx context.Context, namespace string, client resource.ResourceClient) ([]schema.GroupResource, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, def := range r.definitions {
+		if _, ok := def.Migrators[gr]; ok {
+			return def.ResourceGroupsFunc
+		}
+	}
+	return nil
 }

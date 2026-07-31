@@ -2,10 +2,10 @@
 import { lowerCase } from 'lodash';
 import moment from 'moment-timezone';
 
-import { DateTimeOptions, getTimeZone } from './common';
+import { type DateTimeOptions, getTimeZone } from './common';
 import { parse, isValid } from './datemath';
 import { systemDateFormats } from './formats';
-import { DateTimeInput, DateTime, isDateTime, dateTime, toUtc, dateTimeForTimeZone } from './moment_wrapper';
+import { type DateTimeInput, type DateTime, isDateTime, dateTime, toUtc, dateTimeForTimeZone } from './moment_wrapper';
 
 /**
  * The type that describes options that can be passed when parsing a date and time value.
@@ -60,6 +60,14 @@ const parseString = (value: string, options?: DateTimeOptionsWhenParsing): DateT
 
     const parsed = parse(value, options?.roundUp, options?.timeZone, options?.fiscalYearStartMonth);
     return parsed || dateTime();
+  }
+
+  // Epoch millisecond strings (e.g. "1704067200000" from URL params like ?from=1704067200000)
+  // must not be parsed through the date format — moment("1704067200000", "YYYY-MM-DD HH:mm:ss")
+  // produces an invalid DateTime whose valueOf() === NaN, which propagates to $__from/$__to
+  // scoped variables and causes literal "NaN" to appear in SQL queries (issue #119445).
+  if (/^\d+$/.test(value)) {
+    return parseOthers(parseInt(value, 10), options);
   }
 
   let timeZone = getTimeZone(options);

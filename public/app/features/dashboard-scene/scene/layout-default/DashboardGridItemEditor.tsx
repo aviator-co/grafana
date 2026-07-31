@@ -1,6 +1,6 @@
 import { useCallback } from 'react';
 
-import { SelectableValue } from '@grafana/data';
+import { type SelectableValue } from '@grafana/data';
 import { t, Trans } from '@grafana/i18n';
 import { config } from '@grafana/runtime';
 import { sceneGraph, SceneGridLayout } from '@grafana/scenes';
@@ -10,9 +10,9 @@ import { OptionsPaneItemDescriptor } from 'app/features/dashboard/components/Pan
 import { RepeatRowSelect2 } from 'app/features/dashboard/components/RepeatRowSelect/RepeatRowSelect';
 
 import { useConditionalRenderingEditor } from '../../conditional-rendering/hooks/useConditionalRenderingEditor';
-import { dashboardEditActions } from '../../edit-pane/shared';
+import { dashboardEditActions } from '../../sidebar/shared';
 
-import { DashboardGridItem } from './DashboardGridItem';
+import { type DashboardGridItem } from './DashboardGridItem';
 
 export function getDashboardGridItemOptions(gridItem: DashboardGridItem): OptionsPaneCategoryDescriptor[] {
   const categoryId = 'repeat-options';

@@ -4,9 +4,9 @@ import { OptionsPaneItemDescriptor } from 'app/features/dashboard/components/Pan
 import { RepeatRowSelect2 } from 'app/features/dashboard/components/RepeatRowSelect/RepeatRowSelect';
 
 import { useConditionalRenderingEditor } from '../../conditional-rendering/hooks/useConditionalRenderingEditor';
-import { dashboardEditActions } from '../../edit-pane/shared';
+import { dashboardEditActions } from '../../sidebar/shared';
 
-import { AutoGridItem } from './AutoGridItem';
+import { type AutoGridItem } from './AutoGridItem';
 
 export function getOptions(model: AutoGridItem): OptionsPaneCategoryDescriptor[] {
   const repeatCategory = new OptionsPaneCategoryDescriptor({

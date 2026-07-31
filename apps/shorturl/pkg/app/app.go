@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"path"
 	"strings"
 	"time"
 
@@ -22,11 +21,13 @@ import (
 	"github.com/grafana/grafana/pkg/apimachinery/identity"
 )
 
-// Local error definitions to avoid importing the main shorturls package
-var (
-	ErrShortURLAbsolutePath = fmt.Errorf("path should be relative")
-	ErrShortURLInvalidPath  = fmt.Errorf("invalid short URL path")
-)
+// Config carries the app-specific configuration for the shorturl app.
+type Config struct {
+	// AppURL is Grafana's configured root URL (root_url), including any subpath
+	// configured via serve_from_sub_path. It is used to build absolute redirect
+	// URLs for the goto subresource so the redirect preserves the subpath.
+	AppURL string
+}
 
 func New(cfg app.Config) (app.App, error) {
 	cfg.KubeConfig.APIPath = "apis"
@@ -36,6 +37,15 @@ func New(cfg app.Config) (app.App, error) {
 		return nil, fmt.Errorf("unable to create client")
 	}
 	client := shorturlv1beta1.NewShortURLClient(tmp)
+
+	// Grafana's configured root URL. When the app runs in-process this is the
+	// authoritative base for redirects; it includes the subpath. We derive the
+	// base from the request path only as a fallback (e.g. standalone deployments
+	// where SpecificConfig is not provided).
+	var configuredAppURL string
+	if specificConfig, ok := cfg.SpecificConfig.(*Config); ok && specificConfig != nil {
+		configuredAppURL = strings.TrimSuffix(specificConfig.AppURL, "/")
+	}
 
 	simpleConfig := simple.AppConfig{
 		Name:       "shorturl",
@@ -58,14 +68,7 @@ func New(cfg app.Config) (app.App, error) {
 							return fmt.Errorf("expected ShortURL object, got %T", req.Object)
 						}
 
-						relPath := strings.TrimSpace(shortURL.Spec.Path)
-						if path.IsAbs(relPath) {
-							return fmt.Errorf("%w: %s", ErrShortURLAbsolutePath, relPath)
-						}
-						if strings.Contains(relPath, "../") {
-							return fmt.Errorf("%w: %s", ErrShortURLInvalidPath, relPath)
-						}
-						return nil
+						return validateRelativePath(shortURL.Spec.Path)
 					},
 				},
 				CustomRoutes: simple.AppCustomRouteHandlers{
@@ -73,9 +76,9 @@ func New(cfg app.Config) (app.App, error) {
 						Method: "GET",
 						Path:   "goto",
 					}: func(ctx context.Context, w app.CustomRouteResponseWriter, req *app.CustomRouteRequest) error {
-						url, _, found := strings.Cut(req.URL.Path, "/apis/") // This will be settings.AppURL
-						if !found {
-							return fmt.Errorf("unable to parse request URL")
+						appURL, err := resolveAppURL(configuredAppURL, req.URL.Path)
+						if err != nil {
+							return err
 						}
 						id := resource.Identifier{
 							Namespace: req.ResourceIdentifier.Namespace,
@@ -85,6 +88,11 @@ func New(cfg app.Config) (app.App, error) {
 						info, err := client.Get(ctx, id)
 						if err != nil {
 							return err
+						}
+
+						// Safety net: validate the stored path before redirecting
+						if err := validateRelativePath(info.Spec.Path); err != nil {
+							return fmt.Errorf("stored short URL has invalid path: %w", err)
 						}
 
 						// Update lastSeenAt in the background
@@ -103,13 +111,13 @@ func New(cfg app.Config) (app.App, error) {
 							}
 						}()
 
-						url = url + "/" + info.Spec.Path
+						redirectURL := appURL + "/" + info.Spec.Path
 						if req.URL.Query().Get("redirect") == "false" { // helpful for testing
 							return json.NewEncoder(w).Encode(shorturlv1beta1.GetGotoResponse{
-								Url: url,
+								Url: redirectURL,
 							})
 						}
-						w.Header().Add("Location", url)
+						w.Header().Add("Location", redirectURL)
 						w.WriteHeader(http.StatusFound)
 						return nil
 					},
@@ -129,6 +137,25 @@ func New(cfg app.Config) (app.App, error) {
 	}
 
 	return a, nil
+}
+
+// resolveAppURL returns the base URL used to build short URL redirects.
+//
+// It prefers Grafana's configured root URL (which includes any subpath from
+// serve_from_sub_path) so the redirect preserves the subpath. The request path
+// is only a fallback for deployments where the configured URL is unavailable:
+// for the in-process loopback call the path is "/apis/..." with the subpath
+// already stripped, so relying on it there would drop the subpath from the
+// redirect Location.
+func resolveAppURL(configuredAppURL, requestPath string) (string, error) {
+	if configuredAppURL != "" {
+		return configuredAppURL, nil
+	}
+	base, _, found := strings.Cut(requestPath, "/apis/")
+	if !found {
+		return "", fmt.Errorf("unable to parse request URL")
+	}
+	return base, nil
 }
 
 func GetKinds() map[schema.GroupVersion][]resource.Kind {

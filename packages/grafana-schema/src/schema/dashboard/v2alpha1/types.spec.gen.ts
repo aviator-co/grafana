@@ -106,7 +106,10 @@ export const defaultPanelKind = (): PanelKind => ({
 export interface PanelSpec {
 	id: number;
 	title: string;
-	description: string;
+	// Shown in a info icon tooltip next to panel title
+	description?: string;
+	// Shown in a sub header below the title.
+	subtitle?: string;
 	links: DataLink[];
 	data: QueryGroupKind;
 	vizConfig: VizConfigKind;
@@ -116,7 +119,6 @@ export interface PanelSpec {
 export const defaultPanelSpec = (): PanelSpec => ({
 	id: 0,
 	title: "",
-	description: "",
 	links: [],
 	data: defaultQueryGroupKind(),
 	vizConfig: defaultVizConfigKind(),
@@ -216,6 +218,8 @@ export const defaultDataTransformerConfig = (): DataTransformerConfig => ({
 export interface MatcherConfig {
 	// The matcher id. This is used to find the matcher implementation from registry.
 	id: string;
+	// If set, limits this matcher to fields of that type. If not set, "series" mode is used.
+	scope?: MatcherScope;
 	// The matcher options. This is specific to the matcher implementation.
 	options?: any;
 }
@@ -223,6 +227,10 @@ export interface MatcherConfig {
 export const defaultMatcherConfig = (): MatcherConfig => ({
 	id: "",
 });
+
+export type MatcherScope = "series" | "nested" | "annotation" | "exemplar";
+
+export const defaultMatcherScope = (): MatcherScope => ("series");
 
 // A topic is attached to DataFrame metadata in query results.
 // This specifies where the data should be used.
@@ -234,6 +242,7 @@ export interface QueryOptionsSpec {
 	timeFrom?: string;
 	maxDataPoints?: number;
 	timeShift?: string;
+	timeCompare?: string;
 	queryCachingTTL?: number;
 	interval?: string;
 	cacheTimeout?: string;
@@ -482,6 +491,8 @@ export const defaultThresholdsMode = (): ThresholdsMode => ("absolute");
 export interface Threshold {
 	// Value null means -Infinity
 	value: number | null;
+	// Optional dashboard-variable expression (e.g. `$myVar`) resolved at render time; `value` is the numeric fallback when the expression cannot be resolved to a single finite number.
+	valueExpr?: string;
 	color: string;
 }
 
@@ -496,6 +507,8 @@ export interface FieldColor {
 	mode: FieldColorModeId;
 	// The fixed color value for fixed or shades color modes.
 	fixedColor?: string;
+	// The end color for the gradient color mode (smallest value). Only used when mode is gradient.
+	gradientColorTo?: string;
 	// Some visualizations need to know how to assign a series color from by value color schemes.
 	seriesBy?: FieldColorSeriesByMode;
 }
@@ -510,6 +523,10 @@ export const defaultFieldColor = (): FieldColor => ({
 // `thresholds`: From thresholds. Informs Grafana to take the color from the matching threshold
 // `palette-classic`: Classic palette. Grafana will assign color by looking up a color in a palette by series index. Useful for Graphs and pie charts and other categorical data visualizations
 // `palette-classic-by-name`: Classic palette (by name). Grafana will assign color by looking up a color in a palette by series name. Useful for Graphs and pie charts and other categorical data visualizations
+// `palette-colorblind`: Color blind safe palette. A discrete palette whose colors are distinguishable under common forms of color vision deficiency. Useful for categorical and multi-series data visualizations
+// `palette-categorical-next`: Experimental categorical palette. Useful for categorical and multi-series data visualizations
+// `palette-categorical-next-2`: Experimental categorical palette. Useful for categorical and multi-series data visualizations
+// `palette-categorical-next-3`: Experimental categorical palette. Useful for categorical and multi-series data visualizations
 // `continuous-viridis`: Continuous Viridis palette mode
 // `continuous-magma`: Continuous Magma palette mode
 // `continuous-plasma`: Continuous Plasma palette mode
@@ -527,7 +544,8 @@ export const defaultFieldColor = (): FieldColor => ({
 // `continuous-purples`: Continuous Purple palette mode
 // `shades`: Shades of a single color. Specify a single color, useful in an override rule.
 // `fixed`: Fixed color mode. Specify a single color, useful in an override rule.
-export type FieldColorModeId = "thresholds" | "palette-classic" | "palette-classic-by-name" | "continuous-viridis" | "continuous-magma" | "continuous-plasma" | "continuous-inferno" | "continuous-cividis" | "continuous-GrYlRd" | "continuous-RdYlGr" | "continuous-BlYlRd" | "continuous-YlRd" | "continuous-BlPu" | "continuous-YlBl" | "continuous-blues" | "continuous-reds" | "continuous-greens" | "continuous-purples" | "fixed" | "shades";
+// `gradient`: Gradient color mode. Interpolate between two colors based on value order; the start color is taken from fixedColor and the end color from gradientColorTo.
+export type FieldColorModeId = "thresholds" | "palette-classic" | "palette-classic-by-name" | "palette-colorblind" | "palette-categorical-next" | "palette-categorical-next-2" | "palette-categorical-next-3" | "continuous-viridis" | "continuous-magma" | "continuous-plasma" | "continuous-inferno" | "continuous-cividis" | "continuous-GrYlRd" | "continuous-RdYlGr" | "continuous-BlYlRd" | "continuous-YlRd" | "continuous-BlPu" | "continuous-YlBl" | "continuous-blues" | "continuous-reds" | "continuous-greens" | "continuous-purples" | "fixed" | "shades" | "gradient";
 
 export const defaultFieldColorModeId = (): FieldColorModeId => ("thresholds");
 
@@ -1162,8 +1180,8 @@ export const defaultVariableOption = (): VariableOption => ({
 });
 
 // Determine if the variable shows on dashboard
-// Accepted values are `dontHide` (show label and value), `hideLabel` (show value only), `hideVariable` (show nothing).
-export type VariableHide = "dontHide" | "hideLabel" | "hideVariable";
+// Accepted values are `dontHide` (show label and value), `hideLabel` (show value only), `hideVariable` (show nothing), `inControlsMenu` (show in a drop-down menu).
+export type VariableHide = "dontHide" | "hideLabel" | "hideVariable" | "inControlsMenu";
 
 export const defaultVariableHide = (): VariableHide => ("dontHide");
 
@@ -1437,6 +1455,8 @@ export interface AdhocVariableSpec {
 	skipUrlSync: boolean;
 	description?: string;
 	allowCustomValue: boolean;
+	// Whether the group-by operator is enabled in the ad hoc filter combobox.
+	enableGroupBy?: boolean;
 }
 
 export const defaultAdhocVariableSpec = (): AdhocVariableSpec => ({
@@ -1447,6 +1467,7 @@ export const defaultAdhocVariableSpec = (): AdhocVariableSpec => ({
 	hide: "dontHide",
 	skipUrlSync: false,
 	allowCustomValue: true,
+	enableGroupBy: false,
 });
 
 // Define the AdHocFilterWithLabels type

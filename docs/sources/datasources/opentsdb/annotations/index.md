@@ -14,34 +14,13 @@ menuTitle: Annotations
 title: OpenTSDB annotations
 weight: 450
 last_reviewed: 2026-01-28
-refs:
-  annotations:
-    - pattern: /docs/grafana/
-      destination: /docs/grafana/<GRAFANA_VERSION>/dashboards/build-dashboards/annotate-visualizations/
-    - pattern: /docs/grafana-cloud/
-      destination: /docs/grafana/<GRAFANA_VERSION>/dashboards/build-dashboards/annotate-visualizations/
-  query-editor:
-    - pattern: /docs/grafana/
-      destination: /docs/grafana/<GRAFANA_VERSION>/datasources/opentsdb/query-editor/
-    - pattern: /docs/grafana-cloud/
-      destination: /docs/grafana/<GRAFANA_VERSION>/datasources/opentsdb/query-editor/
-  template-variables:
-    - pattern: /docs/grafana/
-      destination: /docs/grafana/<GRAFANA_VERSION>/datasources/opentsdb/template-variables/
-    - pattern: /docs/grafana-cloud/
-      destination: /docs/grafana/<GRAFANA_VERSION>/datasources/opentsdb/template-variables/
-  alerting:
-    - pattern: /docs/grafana/
-      destination: /docs/grafana/<GRAFANA_VERSION>/datasources/opentsdb/alerting/
-    - pattern: /docs/grafana-cloud/
-      destination: /docs/grafana/<GRAFANA_VERSION>/datasources/opentsdb/alerting/
 ---
 
 # OpenTSDB annotations
 
 Annotations allow you to overlay event information on graphs, providing context for metric changes. The OpenTSDB data source supports both metric-specific annotations and global annotations stored in OpenTSDB.
 
-For general information about annotations in Grafana, refer to [Annotate visualizations](ref:annotations).
+For general information about annotations in Grafana, refer to [Annotate visualizations](https://grafana.com/docs/grafana/<GRAFANA_VERSION>/dashboards/build-dashboards/annotate-visualizations/).
 
 ## Annotation types
 
@@ -62,12 +41,23 @@ Grafana displays the `description` field from each annotation as the annotation 
 
 To add OpenTSDB annotations to a dashboard:
 
-1. Click the dashboard settings icon (gear) in the top navigation.
-1. Select **Annotations** in the left menu.
-1. Click **Add annotation query**.
-1. Select the **OpenTSDB** data source.
-1. Configure the annotation query fields as described in the following table.
-1. Click **Save dashboard**.
+1. Navigate to the dashboard you want to update and click **Edit**.
+1. Click the **Add new element** icon (blue plus sign).
+1. Click **Annotation query**.
+1. Enter a name for the annotation query.
+1. If you don't want to use the annotation query right away, clear the **Enabled** checkbox.
+1. Select a color for the annotation event markers.
+1. Select an option in the **Show annotation controls in** drop-down list to control where on the dashboard the annotation is displayed.
+1. Select an option in the **Show in** drop-down list to control the panels in which the annotation is displayed.
+1. Click **Open query editor** to open the **Annotation Query** dialog box.
+1. Select the **OpenTSDB** data source from the **Data source** drop-down list.
+1. Configure the annotation query and field mappings.
+1. (Optional) Click **Test annotation query** to ensure that the query is working properly.
+1. Click **Close** when you've completed the query setup.
+1. Click **Save**.
+1. (Optional) Enter a description of the changes you've made.
+1. Click **Save**.
+1. Click **Exit edit**.
 
 ## Annotation query fields
 
@@ -145,7 +135,7 @@ Annotations appear as vertical lines on time series panels at the timestamps whe
 - The event description (from the OpenTSDB annotation's `description` field)
 - The timestamp
 
-Different annotation queries can be assigned different colors in the dashboard settings to distinguish between event types.
+Different annotation queries can be assigned different colors in the annotation settings to distinguish between event types.
 
 ## Create annotations in OpenTSDB
 
@@ -249,6 +239,6 @@ The annotation displays but has no description text.
 
 ## Next steps
 
-- [Build queries](ref:query-editor) to visualize metrics alongside annotations.
-- [Use template variables](ref:template-variables) to create dynamic dashboards.
-- [Set up alerting](ref:alerting) to get notified when metrics cross thresholds.
+- [Build queries](https://grafana.com/docs/grafana/<GRAFANA_VERSION>/datasources/opentsdb/query-editor/) to visualize metrics alongside annotations.
+- [Use template variables](https://grafana.com/docs/grafana/<GRAFANA_VERSION>/datasources/opentsdb/template-variables/) to create dynamic dashboards.
+- [Set up alerting](https://grafana.com/docs/grafana/<GRAFANA_VERSION>/datasources/opentsdb/alerting/) to get notified when metrics cross thresholds.

@@ -10,6 +10,7 @@ type ItemQuery struct {
 	From     int64  `json:"from"`
 	To       int64  `json:"to"`
 	UserID   int64  `json:"userId"`
+	UserUID  string `json:"userUID"`
 	AlertID  int64  `json:"alertId"`
 	AlertUID string `json:"alertUID"`
 	// Deprecated: Use DashboardUID and OrgID instead
@@ -31,6 +32,7 @@ type ItemQuery struct {
 type TagsQuery struct {
 	OrgID int64  `json:"orgId"`
 	Tag   string `json:"tag"`
+	Type  string `json:"type"` // filter based on annotation type: "alert" or "annotation"
 
 	Limit int64 `json:"limit"`
 }
@@ -120,6 +122,7 @@ type ItemDTO struct {
 	DashboardUID *string          `json:"dashboardUID,omitempty" xorm:"dashboard_uid"`
 	PanelID      int64            `json:"panelId,omitempty" xorm:"panel_id"`
 	UserID       int64            `json:"userId,omitempty" xorm:"user_id"`
+	UserUID      string           `json:"userUID,omitempty" xorm:"user_uid"`
 	NewState     string           `json:"newState,omitempty"`
 	PrevState    string           `json:"prevState,omitempty"`
 	Created      int64            `json:"created,omitempty"`

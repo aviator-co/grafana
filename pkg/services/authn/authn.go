@@ -29,7 +29,6 @@ const (
 	ClientForm         = "auth.client.form"
 	ClientProxy        = "auth.client.proxy"
 	ClientSAML         = "auth.client.saml"
-	ClientPasswordless = "auth.client.passwordless"
 	ClientLDAP         = "ldap"
 	ClientProvisioning = "auth.client.apiserver.provisioning"
 )
@@ -69,8 +68,11 @@ type ClientParams struct {
 }
 
 type FetchPermissionsParams struct {
-	// RestrictedActions will restrict the permissions to only these actions
+	// RestrictedActions will restrict the permissions to only these Grafana-style actions
 	RestrictedActions []string
+	// K8sRestrictedActions will restrict the permissions to only the Grafana actions
+	// that the Kubernetes-style permission strings translate to
+	K8sRestrictedActions []string
 	// AllowedActions will be added to the identity permissions
 	AllowedActions []string
 	// Note: Kept for backwards compatibility, use K8s style instead
@@ -269,7 +271,7 @@ func HandleLoginResponse(r *http.Request, w http.ResponseWriter, cfg *setting.Cf
 // HandleLoginRedirect is a utility function to perform common operations after a successful login and redirects
 func HandleLoginRedirect(r *http.Request, w http.ResponseWriter, cfg *setting.Cfg, identity *Identity, validator RedirectValidator, features featuremgmt.FeatureToggles) {
 	redirectURL := handleLogin(r, w, cfg, identity, validator, features, "redirectTo")
-	http.Redirect(w, r, redirectURL, http.StatusFound)
+	http.Redirect(w, r, redirectURL, http.StatusFound) // #nosec G710 -- redirectURL validated by RedirectValidator in handleLogin
 }
 
 // HandleLoginRedirectResponse is a utility function to perform common operations after a successful login and return a response.RedirectResponse

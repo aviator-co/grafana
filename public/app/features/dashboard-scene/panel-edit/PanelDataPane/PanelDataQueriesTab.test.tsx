@@ -4,17 +4,17 @@ import { of, map } from 'rxjs';
 
 import {
   CoreApp,
-  DataQuery,
-  DataQueryRequest,
-  DataSourceApi,
-  DataSourceInstanceSettings,
-  DataSourceJsonData,
-  DataSourceRef,
+  type DataQuery,
+  type DataQueryRequest,
+  type DataSourceApi,
+  type DataSourceInstanceSettings,
+  type DataSourceJsonData,
+  type DataSourceRef,
   FieldType,
   LoadingState,
-  PanelData,
+  type PanelData,
   PluginType,
-  TimeRange,
+  type TimeRange,
   toDataFrame,
 } from '@grafana/data';
 import { getPanelPlugin } from '@grafana/data/test';
@@ -22,15 +22,16 @@ import { selectors } from '@grafana/e2e-selectors';
 import { config } from '@grafana/runtime';
 import { contextSrv } from 'app/core/services/context_srv';
 import { PANEL_EDIT_LAST_USED_DATASOURCE } from 'app/features/dashboard/utils/dashboard';
+import { ExpressionQueryType } from 'app/features/expressions/types';
 import { SHARED_DASHBOARD_QUERY, DASHBOARD_DATASOURCE_PLUGIN_ID } from 'app/plugins/datasource/dashboard/constants';
-import { DashboardDataDTO } from 'app/types/dashboard';
+import { type DashboardDataDTO } from 'app/types/dashboard';
 
 import { PanelInspectDrawer } from '../../inspect/PanelInspectDrawer';
-import { PanelTimeRange, PanelTimeRangeState } from '../../scene/panel-timerange/PanelTimeRange';
-import { DashboardLayoutManager } from '../../scene/types/DashboardLayoutManager';
+import { PanelTimeRange, type PanelTimeRangeState } from '../../scene/panel-timerange/PanelTimeRange';
+import { type DashboardLayoutManager } from '../../scene/types/DashboardLayoutManager';
 import { transformSaveModelSchemaV2ToScene } from '../../serialization/transformSaveModelSchemaV2ToScene';
 import { transformSaveModelToScene } from '../../serialization/transformSaveModelToScene';
-import { findVizPanelByKey } from '../../utils/utils';
+import { activateSceneObjectAndParentTree, findVizPanelByKey } from '../../utils/utils';
 import { buildPanelEditScene } from '../PanelEditor';
 import {
   testDashboard,
@@ -40,7 +41,7 @@ import {
 } from '../testfiles/testDashboard';
 
 import { PanelDataPane } from './PanelDataPane';
-import { PanelDataQueriesTab, PanelDataQueriesTabRendered } from './PanelDataQueriesTab';
+import { type PanelDataQueriesTab, PanelDataQueriesTabRendered } from './PanelDataQueriesTab';
 
 async function createModelMock() {
   const { queriesTab } = await setupScene('panel-1');
@@ -393,6 +394,16 @@ describe('PanelDataQueriesTab', () => {
       expect(queriesTab.queryRunner.state.queries[1].hide).toBe(false);
       expect(queriesTab.queryRunner.state.queries[1].datasource?.uid).toBe('gdev-testdata');
     });
+
+    it('returns the refId of a newly added expression, so callers can scroll to it', async () => {
+      const { queriesTab } = await setupScene('panel-1');
+
+      const refId = queriesTab.onAddExpressionOfType(ExpressionQueryType.sql);
+
+      const queries = queriesTab.queryRunner.state.queries;
+      expect(refId).toBe('B');
+      expect(queries[queries.length - 1].refId).toBe('B');
+    });
   });
 
   describe('PanelDataQueriesTab', () => {
@@ -407,7 +418,7 @@ describe('PanelDataQueriesTab', () => {
       const modelMock = await createModelMock();
       render(<PanelDataQueriesTabRendered model={modelMock}></PanelDataQueriesTabRendered>);
 
-      expect(await screen.findAllByTestId('query-editor-row')).toHaveLength(1);
+      expect(await screen.findAllByTestId(selectors.components.QueryEditorRows.rows)).toHaveLength(1);
     });
 
     it('allow to add a new query when user clicks on add new', async () => {
@@ -621,6 +632,22 @@ describe('PanelDataQueriesTab', () => {
           });
 
           expect(panel.state.$timeRange).toBeUndefined();
+        });
+
+        it('should preserve compareWith when updating other query options', async () => {
+          const { queriesTab, panel } = await setupScene('panel-1');
+
+          panel.setState({ $timeRange: new PanelTimeRange({ compareWith: '1d' }) });
+
+          queriesTab.onQueryOptionsChange({
+            dataSource: { name: 'grafana-testdata', type: 'grafana-testdata-datasource', default: true },
+            queries: [],
+            maxDataPoints: 100,
+            timeRange: { from: undefined, shift: undefined },
+          });
+
+          expect(panel.state.$timeRange).toBeInstanceOf(PanelTimeRange);
+          expect((panel.state.$timeRange?.state as PanelTimeRangeState).compareWith).toBe('1d');
         });
       });
 
@@ -995,7 +1022,9 @@ async function setupScene(panelId: string) {
   const panelEditor = buildPanelEditScene(panel);
   dashboard.setState({ editPanel: panelEditor });
 
-  deactivators.push(dashboard.activate());
+  const deactivate = activateSceneObjectAndParentTree(panel);
+
+  deactivators.push(deactivate!);
   deactivators.push(panelEditor.activate());
 
   const dataPane = panelEditor.state.dataPane;
@@ -1020,7 +1049,9 @@ async function setupV2Scene(panelKey: string) {
   const panelEditor = buildPanelEditScene(panel);
   dashboard.setState({ editPanel: panelEditor });
 
-  deactivators.push(dashboard.activate());
+  const deactivate = activateSceneObjectAndParentTree(panel);
+
+  deactivators.push(deactivate!);
   deactivators.push(panelEditor.activate());
 
   const dataPane = panelEditor.state.dataPane;

@@ -18,6 +18,7 @@ import { CanvasGridAddActions } from './CanvasGridAddActions';
 
 jest.mock('../../utils/interactions', () => ({
   DashboardInteractions: {
+    editSessionStarted: jest.fn(),
     trackAddPanelClick: jest.fn(),
     trackGroupRowClick: jest.fn(),
     trackGroupTabClick: jest.fn(),
@@ -51,30 +52,32 @@ setPluginImportUtils({
   getPanelPluginFromCache: (id: string) => undefined,
 });
 
-function buildTestScene() {
-  const sceneWithNestedLayout = new DashboardScene({
+function buildTestScene(body?: DashboardScene['state']['body']) {
+  const scene = new DashboardScene({
     $timeRange: new SceneTimeRange({ from: 'now-6h', to: 'now' }),
     isEditing: true,
-    body: new TabsLayoutManager({
-      tabs: [
-        new TabItem({
-          title: 'test tab',
-          layout: new RowsLayoutManager({
-            rows: [
-              new RowItem({
-                title: 'Test Title',
-                layout: new TabsLayoutManager({
-                  tabs: [new TabItem({ title: 'Subtab' })],
+    body:
+      body ??
+      new TabsLayoutManager({
+        tabs: [
+          new TabItem({
+            title: 'test tab',
+            layout: new RowsLayoutManager({
+              rows: [
+                new RowItem({
+                  title: 'Test Title',
+                  layout: new TabsLayoutManager({
+                    tabs: [new TabItem({ title: 'Subtab' })],
+                  }),
                 }),
-              }),
-            ],
+              ],
+            }),
           }),
-        }),
-      ],
-    }),
+        ],
+      }),
   });
-  activateFullSceneTree(sceneWithNestedLayout);
-  return sceneWithNestedLayout;
+  activateFullSceneTree(scene);
+  return scene;
 }
 
 describe('CanvasGridAddActions', () => {

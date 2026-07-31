@@ -2,8 +2,19 @@ package annotation
 
 import (
 	"context"
+	"errors"
+	"time"
 
 	annotationV0 "github.com/grafana/grafana/apps/annotation/pkg/apis/annotation/v0alpha1"
+)
+
+var (
+	// ErrNotFound is returned when the requested annotation does not exist.
+	ErrNotFound = errors.New("annotation not found")
+	// ErrAlreadyExists is returned when a unique constraint would be violated.
+	ErrAlreadyExists = errors.New("annotation already exists")
+	// ErrInvalidInput is returned for caller-supplied input the backend cannot accept.
+	ErrInvalidInput = errors.New("invalid annotation input")
 )
 
 type Store interface {
@@ -12,20 +23,39 @@ type Store interface {
 	Create(ctx context.Context, annotation *annotationV0.Annotation) (*annotationV0.Annotation, error)
 	Update(ctx context.Context, annotation *annotationV0.Annotation) (*annotationV0.Annotation, error)
 	Delete(ctx context.Context, namespace, name string) error
+	Close() error
 }
 
 type ListOptions struct {
-	DashboardUID   string
-	PanelID        int64
-	From           int64
-	To             int64
-	Limit          int64
-	Continue       string
+	DashboardUID string
+	PanelID      int64
+	From         int64
+	To           int64
+	Limit        int64
+	Continue     string
+	// CreatedBy filters by the uid of the user who created the annotation
+	CreatedBy      string
 	Tags           []string
 	TagsMatchAny   bool
 	Scopes         []string
 	ScopesMatchAny bool
+
+	// LegacyID filters by the legacy numeric ID
+	LegacyID int64
+
+	// Deleted controls whether soft-deleted annotations (tombstones) are returned.
+	Deleted DeletedFilter
 }
+
+// DeletedFilter controls whether soft-deleted annotations (tombstones) are
+// included in a list.
+type DeletedFilter int
+
+const (
+	DeletedExclude DeletedFilter = iota // live only (zero value)
+	DeletedInclude                      // live and tombstones
+	DeletedOnly                         // tombstones only
+)
 
 type AnnotationList struct {
 	Items    []annotationV0.Annotation
@@ -33,7 +63,7 @@ type AnnotationList struct {
 }
 
 type LifecycleManager interface {
-	Cleanup(ctx context.Context) (int64, error)
+	Cleanup(ctx context.Context, before time.Time) (int64, error)
 }
 
 type TagProvider interface {

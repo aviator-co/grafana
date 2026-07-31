@@ -1,26 +1,26 @@
 import { identity, isEqual } from 'lodash';
-import { MutableRefObject } from 'react';
+import { type MutableRefObject } from 'react';
 
 import { EventBusSrv } from '@grafana/data';
-import { LocationService } from '@grafana/runtime';
-import { DataQuery } from '@grafana/schema';
+import { type LocationService } from '@grafana/runtime';
+import { type DataQuery } from '@grafana/schema';
 import { initializeExplore } from 'app/features/explore/state/explorePane';
 import { clearPanes, syncTimesAction } from 'app/features/explore/state/main';
 import { fromURLRange } from 'app/features/explore/state/utils';
 import { withUniqueRefIds } from 'app/features/explore/utils/queries';
 import { getDatasourceSrv } from 'app/features/plugins/datasource_srv';
-import { ThunkDispatch } from 'app/types/store';
+import { type ThunkDispatch } from 'app/types/store';
 
 import { getUrlStateFromPaneState } from '../external.utils';
 import {
   getDefaultQuery,
   getPaneDatasource,
   getQueryFilter,
-  InitState,
+  type InitState,
   isMixedDatasource,
   removeQueriesWithInvalidDatasource,
 } from '../internal.utils';
-import { ExploreURLV1 } from '../migrators/v1';
+import { type ExploreURLV1 } from '../migrators/v1';
 
 export function initializeFromURL(
   urlState: ExploreURLV1,
@@ -31,6 +31,13 @@ export function initializeFromURL(
 ) {
   // Clear all the panes in the store first to avoid stale data.
   dispatch(clearPanes());
+
+  // Seeded onto the first pane only so the "Adding a new saved query" banner shows; split-view URLs are unaffected.
+  const addingSavedQuery = location.getSearch().get('createSavedQuery') === 'true';
+
+  // Seeding it at init (rather than a post-navigation dispatch) is what lets the "Editing from saved queries" banner render
+  // on the first, cold Explore mount. First pane only, mirroring addingSavedQuery.
+  const editSavedQueryRef = location.getSearch().get('editSavedQueryRef') ?? undefined;
 
   Promise.all(
     Object.entries(urlState.panes).map(([exploreId, { datasource, queries, range, panelsState, compact }]) => {
@@ -70,7 +77,7 @@ export function initializeFromURL(
     })
   ).then(async (panes) => {
     const initializedPanes = await Promise.all(
-      panes.map(({ exploreId, range, panelsState, queries, datasource, compact }) => {
+      panes.map(({ exploreId, range, panelsState, queries, datasource, compact }, index) => {
         return dispatch(
           initializeExplore({
             exploreId,
@@ -80,6 +87,8 @@ export function initializeFromURL(
             panelsState,
             eventBridge: new EventBusSrv(),
             compact: !!compact,
+            addingSavedQuery: index === 0 ? addingSavedQuery : undefined,
+            editSavedQueryRef: index === 0 ? editSavedQueryRef : undefined,
           })
         ).unwrap();
       })

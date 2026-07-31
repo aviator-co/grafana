@@ -1,16 +1,17 @@
 import { useState } from 'react';
 
+import { selectors } from '@grafana/e2e-selectors';
 import { Trans, t } from '@grafana/i18n';
-import { config, reportInteraction } from '@grafana/runtime';
+import { reportInteraction } from '@grafana/runtime';
 import { Button, Drawer, Stack, Text } from '@grafana/ui';
 import { appEvents } from 'app/core/app_events';
-import { ManagerKind } from 'app/features/apiserver/types';
 import { BulkDeleteProvisionedResource } from 'app/features/provisioning/components/BulkActions/BulkDeleteProvisionedResource';
 import { BulkMoveProvisionedResource } from 'app/features/provisioning/components/BulkActions/BulkMoveProvisionedResource';
 import { useSelectionProvisioningStatus } from 'app/features/provisioning/hooks/useSelectionProvisioningStatus';
+import { isItemManagedByRepository } from 'app/features/provisioning/utils/managedResource';
 import { useSearchStateManager } from 'app/features/search/state/SearchStateManager';
 import { ShowModalReactEvent } from 'app/types/events';
-import { FolderDTO } from 'app/types/folders';
+import { type FolderDTO } from 'app/types/folders';
 import { useDispatch } from 'app/types/store';
 
 import {
@@ -20,7 +21,7 @@ import {
 import { useDeleteDashboardsMutation, useMoveDashboardsMutation } from '../../api/browseDashboardsAPI';
 import { useActionSelectionState } from '../../state/hooks';
 import { setAllSelection } from '../../state/slice';
-import { DashboardTreeSelection } from '../../types';
+import { type DashboardTreeSelection } from '../../types';
 
 import { DeleteModal } from './DeleteModal';
 import { MoveModal } from './MoveModal';
@@ -41,11 +42,9 @@ export function BrowseActions({ folderDTO }: Props) {
   const [moveFolders] = useMoveMultipleFoldersMutationFacade();
   const [moveDashboards] = useMoveDashboardsMutation();
   const [, stateManager] = useSearchStateManager();
-  const provisioningEnabled = config.featureToggles.provisioning;
-
   const { hasProvisioned, hasNonProvisioned } = useSelectionProvisioningStatus(
     selectedItems,
-    folderDTO?.managedBy === ManagerKind.Repo
+    isItemManagedByRepository(folderDTO)
   );
 
   const isSearching = stateManager.hasSearchFilters();
@@ -79,7 +78,7 @@ export function BrowseActions({ folderDTO }: Props) {
   };
 
   const showMoveModal = () => {
-    if (provisioningEnabled && hasProvisioned && hasNonProvisioned) {
+    if (hasProvisioned && hasNonProvisioned) {
       // Mixed selection
       appEvents.publish(
         new ShowModalReactEvent({
@@ -90,7 +89,7 @@ export function BrowseActions({ folderDTO }: Props) {
       return;
     }
 
-    if (provisioningEnabled && hasProvisioned) {
+    if (hasProvisioned) {
       // Only provisioned items
       setShowBulkMoveProvisionedResource(true);
       return;
@@ -109,7 +108,7 @@ export function BrowseActions({ folderDTO }: Props) {
   };
 
   const showDeleteModal = () => {
-    if (hasProvisioned && hasNonProvisioned && provisioningEnabled) {
+    if (hasProvisioned && hasNonProvisioned) {
       // Mixed selection
       appEvents.publish(
         new ShowModalReactEvent({
@@ -117,7 +116,7 @@ export function BrowseActions({ folderDTO }: Props) {
           props: {},
         })
       );
-    } else if (hasProvisioned && provisioningEnabled) {
+    } else if (hasProvisioned) {
       // Only provisioned items
       setShowBulkDeleteProvisionedResource(true);
     } else {
@@ -135,7 +134,11 @@ export function BrowseActions({ folderDTO }: Props) {
   };
 
   const moveButton = (
-    <Button onClick={showMoveModal} variant="secondary">
+    <Button
+      onClick={showMoveModal}
+      variant="secondary"
+      data-testid={selectors.pages.BrowseDashboards.actions.moveButton}
+    >
       <Trans i18nKey="browse-dashboards.action.move-button">Move</Trans>
     </Button>
   );
@@ -145,7 +148,11 @@ export function BrowseActions({ folderDTO }: Props) {
       <Stack gap={1} data-testid="manage-actions">
         {moveButton}
 
-        <Button onClick={showDeleteModal} variant="destructive">
+        <Button
+          onClick={showDeleteModal}
+          variant="destructive"
+          data-testid={selectors.pages.BrowseDashboards.actions.deleteButton}
+        >
           <Trans i18nKey="browse-dashboards.action.delete-button">Delete</Trans>
         </Button>
       </Stack>
@@ -211,6 +218,5 @@ function trackAction(action: keyof typeof actionMap, selectedItems: Omit<Dashboa
       dashboard: selectedDashboards.length,
     },
     source: 'tree_actions',
-    restore_enabled: Boolean(config.featureToggles.restoreDashboards),
   });
 }

@@ -2,7 +2,7 @@ import { DashboardLoadedEvent } from '@grafana/data';
 import { reportInteraction } from '@grafana/runtime';
 
 import './module';
-import { AzureMonitorQuery } from './types/query';
+import { type AzureMonitorQuery } from './types/query';
 
 jest.mock('@grafana/runtime', () => {
   return {
@@ -82,6 +82,7 @@ describe('queriesOnInitDashboard', () => {
       grafana_version: 'v9.0.0',
       org_id: 1,
       azure_monitor_queries: 1,
+      azure_monitor_batch_api_queries: 0,
       azure_monitor_queries_hidden: 1,
       azure_monitor_multiple_resource: 1,
       azure_monitor_query: 2,

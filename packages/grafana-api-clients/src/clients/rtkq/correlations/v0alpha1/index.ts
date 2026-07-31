@@ -4,23 +4,17 @@ import { generatedAPI as rawAPI } from './endpoints.gen';
 export * from './endpoints.gen';
 export const generatedAPI = rawAPI.enhanceEndpoints({
   endpoints: {
-    createCorrelation: (endpointDefinition) => {
+    updateCorrelation: (endpointDefinition) => {
       const originalQuery = endpointDefinition.query;
       if (!originalQuery) {
         return;
       }
-      endpointDefinition.query = (requestOptions) => {
-        // Ensure metadata exists
-        if (!requestOptions.correlation.metadata) {
-          requestOptions.correlation.metadata = {};
-        }
-        const metadata = requestOptions.correlation.metadata;
-        if (!metadata.name && !metadata.generateName) {
-          // GenerateName lets the apiserver create a new uid for the name
-          metadata.generateName = 'c';
-        }
-        return originalQuery(requestOptions);
-      };
+      endpointDefinition.query = (requestOptions) => ({
+        ...originalQuery(requestOptions),
+        headers: {
+          'Content-Type': 'application/merge-patch+json',
+        },
+      });
     },
   },
 });

@@ -4,15 +4,17 @@ on:
   pull_request:
     types: [opened]
     paths:
-      - "public/app/plugins/datasource/elasticsearch/**"
       - "public/app/plugins/datasource/cloudwatch/**"
-      - "pkg/tsdb/elasticsearch/**"
+      - "public/app/plugins/datasource/graphite/**"
+      - "public/app/plugins/datasource/influxdb/**"
       - "pkg/tsdb/cloudwatch/**"
+      - "pkg/tsdb/graphite/**"
+      - "pkg/tsdb/influxdb/**"
 
 jobs:
   add-comment:
     if: ${{ ! github.event.pull_request.head.repo.fork }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-x64-small
     permissions:
       pull-requests: write
     steps:

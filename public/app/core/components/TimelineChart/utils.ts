@@ -1,23 +1,23 @@
 import {
-  DataFrame,
+  type DataFrame,
   FALLBACK_COLOR,
-  Field,
+  type Field,
   FieldColorModeId,
-  FieldConfig,
+  type FieldConfig,
   FieldType,
   formattedValueToString,
   getFieldDisplayName,
   getValueFormat,
-  GrafanaTheme2,
+  type GrafanaTheme2,
   getActiveThreshold,
-  Threshold,
+  type Threshold,
   getFieldConfigWithMinMax,
   ThresholdsMode,
-  TimeRange,
+  type TimeRange,
   cacheFieldDisplayNames,
   outerJoinDataFrames,
-  ValueMapping,
-  ThresholdsConfig,
+  type ValueMapping,
+  type ThresholdsConfig,
   applyNullInsertThreshold,
   nullToValue,
   SpecialValueMatch,
@@ -26,23 +26,23 @@ import {
 import { maybeSortFrame, NULL_RETAIN } from '@grafana/data/internal';
 import { t } from '@grafana/i18n';
 import {
-  VizLegendOptions,
+  type VizLegendOptions,
   AxisPlacement,
   ScaleDirection,
   ScaleOrientation,
-  VisibilityMode,
-  TimelineValueAlignment,
-  HideableFieldConfig,
+  type VisibilityMode,
+  type TimelineValueAlignment,
+  type HideableFieldConfig,
   MappingType,
 } from '@grafana/schema';
 import {
-  StateTimelineLegendOptions,
   StateTimelineLegendReducers,
+  type StateTimelineLegendOptions,
 } from '@grafana/schema/dist/esm/raw/composable/statetimeline/panelcfg/x/StateTimelinePanelCfg_types.gen';
-import { FIXED_UNIT, UPlotConfigBuilder, UPlotConfigPrepFn, VizLegendItem } from '@grafana/ui';
+import { FIXED_UNIT, UPlotConfigBuilder, type UPlotConfigPrepFn, type VizLegendItem } from '@grafana/ui';
 import { preparePlotData2, getStackingGroups } from '@grafana/ui/internal';
 
-import { getConfig, TimelineCoreOptions } from './timeline';
+import { getConfig, type TimelineCoreOptions } from './timeline';
 
 /**
  * @internal
@@ -279,7 +279,7 @@ function getSpanNulls(field: Field) {
 /**
  * Merge values by the threshold
  */
-export function mergeThresholdValues(field: Field, theme: GrafanaTheme2): Field | undefined {
+function mergeThresholdValues(field: Field, theme: GrafanaTheme2): Field | undefined {
   const thresholds = field.config.thresholds;
   if (field.type !== FieldType.number || !thresholds || !thresholds.steps.length) {
     return undefined;

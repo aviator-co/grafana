@@ -1,9 +1,9 @@
 import { t } from '@grafana/i18n';
-import { OptionsPaneCategoryDescriptor } from 'app/features/dashboard/components/PanelEditor/OptionsPaneCategoryDescriptor';
+import { type OptionsPaneCategoryDescriptor } from 'app/features/dashboard/components/PanelEditor/OptionsPaneCategoryDescriptor';
 
-import { EditableDashboardElement, EditableDashboardElementInfo } from '../types/EditableDashboardElement';
+import { type EditableDashboardElement, type EditableDashboardElementInfo } from '../types/EditableDashboardElement';
 
-import { TabItem } from './TabItem';
+import { type TabItem } from './TabItem';
 
 export class TabItems implements EditableDashboardElement {
   public readonly isEditableDashboardElement = true;
@@ -11,10 +11,10 @@ export class TabItems implements EditableDashboardElement {
   public constructor(private _tabs: TabItem[]) {}
 
   public getEditableElementInfo(): EditableDashboardElementInfo {
-    return { typeName: t('dashboard.edit-pane.elements.tabs', 'Tabs'), icon: 'folder', instanceName: '' };
+    return { typeName: t('dashboard.sidebar.elements.tabs', 'Tabs'), icon: 'folder', instanceName: '' };
   }
 
-  public useEditPaneOptions(): OptionsPaneCategoryDescriptor[] {
+  public useSidebarOptions(): OptionsPaneCategoryDescriptor[] {
     return [];
   }
 

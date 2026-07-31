@@ -16,34 +16,13 @@ menuTitle: Template variables
 title: OpenTSDB template variables
 weight: 300
 last_reviewed: 2026-01-28
-refs:
-  variables:
-    - pattern: /docs/grafana/
-      destination: /docs/grafana/<GRAFANA_VERSION>/dashboards/variables/
-    - pattern: /docs/grafana-cloud/
-      destination: /docs/grafana/<GRAFANA_VERSION>/dashboards/variables/
-  troubleshooting-opentsdb:
-    - pattern: /docs/grafana/
-      destination: /docs/grafana/<GRAFANA_VERSION>/datasources/opentsdb/troubleshooting/
-    - pattern: /docs/grafana-cloud/
-      destination: /docs/grafana/<GRAFANA_VERSION>/datasources/opentsdb/troubleshooting/
-  query-editor:
-    - pattern: /docs/grafana/
-      destination: /docs/grafana/<GRAFANA_VERSION>/datasources/opentsdb/query-editor/
-    - pattern: /docs/grafana-cloud/
-      destination: /docs/grafana/<GRAFANA_VERSION>/datasources/opentsdb/query-editor/
-  alerting:
-    - pattern: /docs/grafana/
-      destination: /docs/grafana/<GRAFANA_VERSION>/datasources/opentsdb/alerting/
-    - pattern: /docs/grafana-cloud/
-      destination: /docs/grafana/<GRAFANA_VERSION>/datasources/opentsdb/alerting/
 ---
 
 # OpenTSDB template variables
 
 Instead of hard-coding server, application, and sensor names in your metric queries, you can use template variables. Variables appear as drop-down menus at the top of the dashboard, making it easy to change the data being displayed without editing queries.
 
-For an introduction to template variables, refer to the [Variables](ref:variables) documentation.
+For an introduction to template variables, refer to the [Variables](https://grafana.com/docs/grafana/<GRAFANA_VERSION>/dashboards/variables/) documentation.
 
 ## Query variable
 
@@ -67,15 +46,23 @@ The `tag_names` and `tag_values` functions use the OpenTSDB lookup API, which re
 
 To create a query variable:
 
-1. Navigate to **Dashboard settings** > **Variables**.
-1. Click **Add variable**.
-1. Enter a **Name** for your variable (for example, `host`).
+1. Navigate to the dashboard you want to update and click **Edit**.
+1. Click the **Add new element** icon (blue plus sign).
+1. Click **Variable**.
 1. Select **Query** as the variable type.
+1. Enter a **Name** for your variable (for example, `host`).
+1. Select an option in the **Display** drop-down list to control where on the dashboard the variable is displayed.
+1. Click **Open variable editor** to open the **Query Variable** dialog box.
 1. Select the **OpenTSDB** data source.
 1. Enter your query using one of the supported query functions.
-1. Optionally configure **Multi-value** to allow selecting multiple values.
-1. Optionally configure **Include All option** to add an "All" option.
-1. Click **Apply**.
+1. Click **Close** when you've completed the query setup.
+1. (Optional) Configure **Multi-value** to allow selecting multiple values.
+1. (Optional) Configure **Include All value** to add an "All" option.
+1. (Optional) Turn on the **Allow custom values** switch to allow users to enter custom variable values.
+1. Click **Save**.
+1. (Optional) Enter a description of the changes you've made.
+1. Click **Save**.
+1. Click **Exit edit**.
 
 ### Query variable examples
 
@@ -127,7 +114,7 @@ suggest_tagv(web)
 
 Returns tag values matching `web` across all metrics, such as `webserver01`, `webserver02`, `web-prod-01`.
 
-If template variables aren't populating in the **Preview of values** section, refer to [Troubleshooting](ref:troubleshooting-opentsdb).
+If template variables aren't populating in the **Preview of values** section, refer to [Troubleshooting](https://grafana.com/docs/grafana/<GRAFANA_VERSION>/datasources/opentsdb/troubleshooting/).
 
 ## Nested template variables
 
@@ -246,6 +233,6 @@ Use these in the downsample interval field for automatic interval adjustment:
 
 ## Next steps
 
-- [Build queries](ref:query-editor) using your template variables.
-- [Set up alerting](ref:alerting) with templated queries.
-- [Troubleshoot issues](ref:troubleshooting-opentsdb) if variables aren't populating.
+- [Build queries](https://grafana.com/docs/grafana/<GRAFANA_VERSION>/datasources/opentsdb/query-editor/) using your template variables.
+- [Set up alerting](https://grafana.com/docs/grafana/<GRAFANA_VERSION>/datasources/opentsdb/alerting/) with templated queries.
+- [Troubleshoot issues](https://grafana.com/docs/grafana/<GRAFANA_VERSION>/datasources/opentsdb/troubleshooting/) if variables aren't populating.

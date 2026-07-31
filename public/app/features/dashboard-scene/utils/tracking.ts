@@ -1,10 +1,16 @@
 import { store } from '@grafana/data';
-import { config } from '@grafana/runtime';
-import { getFeatureFlagClient } from '@grafana/runtime/internal';
-import { SceneGridItemLike } from '@grafana/scenes';
+import { config, locationService } from '@grafana/runtime';
+import { FlagKeys, getFeatureFlagClient } from '@grafana/runtime/internal';
+import { type SceneGridItemLike } from '@grafana/scenes';
+import {
+  isTemplateDashboardAssistantEnabled,
+  isSuggestedDashboardAssistantEnabled,
+} from 'app/features/dashboard/dashgrid/DashboardLibrary/utils/assistantHelpers';
 import { getDatasourceTypes } from 'app/features/dashboard/dashgrid/DashboardLibrary/utils/dashboardLibraryHelpers';
+import { DASHBOARD_LIBRARY_ROUTES } from 'app/features/dashboard/dashgrid/types';
 
-import { DashboardScene } from '../scene/DashboardScene';
+import { CustomDashboardTemplateInteractions } from '../analytics/dashboard-templates/main';
+import { type DashboardScene } from '../scene/DashboardScene';
 import { AutoGridItem } from '../scene/layout-auto-grid/AutoGridItem';
 import { DashboardGridItem } from '../scene/layout-default/DashboardGridItem';
 
@@ -36,17 +42,18 @@ export function trackDashboardSceneLoaded(dashboard: DashboardScene, duration?: 
 
 export const trackDashboardSceneEditButtonClicked = (dashboardUid?: string) => {
   DashboardInteractions.editButtonClicked({
-    outlineExpanded: !store.getBool('grafana.dashboard.edit-pane.outline.collapsed', false),
+    outlineExpanded: !store.getBool('grafana.dashboard.sidebar.outline.collapsed', false),
     dashboardUid,
   });
 };
 
-export function trackDashboardSceneCreatedOrSaved(
+export async function trackDashboardSceneCreatedOrSaved(
   isNew: boolean,
   dashboard: DashboardScene,
   initialProperties: {
     name: string;
     url: string;
+    diff_count: number;
     transformation_counts?: Record<string, number>;
     expression_counts?: Record<string, number>;
   }
@@ -62,7 +69,7 @@ export function trackDashboardSceneCreatedOrSaved(
       return acc;
     }, {});
 
-  const dashboardLibraryProperties = getDashboardLibraryTrackingProperties(dashboard);
+  const dashboardLibraryProperties = await getDashboardLibraryTrackingProperties(dashboard);
 
   DashboardInteractions.dashboardCreatedOrSaved(isNew, {
     ...initialProperties,
@@ -87,6 +94,18 @@ export function trackDashboardSceneCreatedOrSaved(
           ...dashboardLibraryProperties,
         }),
   });
+
+  if (getFeatureFlagClient().getBooleanValue(FlagKeys.GrafanaCustomDashboardTemplates, false) && isNew) {
+    const { pathname, search } = locationService.getLocation();
+    const isOnTemplateRoute = pathname === DASHBOARD_LIBRARY_ROUTES.Template;
+    const templateUid = new URLSearchParams(search).get('dashboardTemplateUid');
+    if (isOnTemplateRoute && templateUid) {
+      CustomDashboardTemplateInteractions.dashboardSavedFromTemplate({
+        dashboardUid: dashboard.state.uid ?? '',
+        templateUid,
+      });
+    }
+  }
 }
 
 export function trackDropItemCrossLayout(gridItem: SceneGridItemLike) {
@@ -98,7 +117,7 @@ export function trackDropItemCrossLayout(gridItem: SceneGridItemLike) {
   }
 }
 
-function getDashboardLibraryTrackingProperties(dashboard: DashboardScene) {
+async function getDashboardLibraryTrackingProperties(dashboard: DashboardScene) {
   const isDashboardLibraryEnabled =
     config.featureToggles.dashboardLibrary ||
     config.featureToggles.dashboardTemplates ||
@@ -119,19 +138,13 @@ function getDashboardLibraryTrackingProperties(dashboard: DashboardScene) {
   // Extract datasourceTypes from URL params (supports both community and provisioned dashboards) or dashboard panels
   const datasourceTypes = getDatasourceTypes(dashboard);
 
-  const isDashboardTemplatesAssistantButtonEnabled = getFeatureFlagClient().getBooleanValue(
-    'dashboardTemplatesAssistantButton',
-    false
-  );
-  const isDashboardTemplatesAssistantToolEnabled = getFeatureFlagClient().getBooleanValue(
-    'assistant.frontend.tools.dashboardTemplates',
-    false
-  );
+  const isDashboardTemplatesAssistantEnabled = await isTemplateDashboardAssistantEnabled();
+  const isSuggestedDashboardAssistantButtonEnabled = await isSuggestedDashboardAssistantEnabled();
 
   return {
     isDashboardTemplatesEnabled: config.featureToggles.dashboardTemplates ?? false,
-    isDashboardTemplatesAssistantEnabled:
-      isDashboardTemplatesAssistantButtonEnabled && isDashboardTemplatesAssistantToolEnabled,
+    isDashboardTemplatesAssistantEnabled,
+    isSuggestedDashboardAssistantButtonEnabled,
     datasourceTypes,
     sourceEntryPoint,
     libraryItemId,

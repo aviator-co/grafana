@@ -1,19 +1,19 @@
 import { useCallback, useState } from 'react';
 import { useAsync } from 'react-use';
 
-import { AppEvents, CoreApp, DataSourceInstanceSettings, getDataSourceRef } from '@grafana/data';
+import { AppEvents, type DataSourceInstanceSettings, getDataSourceRef } from '@grafana/data';
 import { t, Trans } from '@grafana/i18n';
 import { getAppEvents, getDataSourceSrv } from '@grafana/runtime';
-import { DataQuery } from '@grafana/schema';
+import { type DataQuery } from '@grafana/schema';
 import { Box, Button, ButtonGroup, Field, Modal, Stack } from '@grafana/ui';
 import StandardAnnotationQueryEditor from 'app/features/annotations/components/StandardAnnotationQueryEditor';
 import { updateAnnotationFromSavedQuery } from 'app/features/annotations/utils/savedQueryUtils';
 import { DataSourcePicker } from 'app/features/datasources/components/picker/DataSourcePicker';
 import { useQueryLibraryContext } from 'app/features/explore/QueryLibrary/QueryLibraryContext';
 
-import { dashboardEditActions } from '../../edit-pane/shared';
+import { dashboardEditActions } from '../../sidebar/shared';
 
-import { AnnotationLayer } from './AnnotationEditableElement';
+import { type AnnotationLayer } from './AnnotationEditableElement';
 
 export function AnnotationQueryEditorButton({ layer }: { layer: AnnotationLayer }) {
   const { queryLibraryEnabled } = useQueryLibraryContext();
@@ -25,20 +25,20 @@ export function AnnotationQueryEditorButton({ layer }: { layer: AnnotationLayer 
         <ButtonGroup>
           <Button
             tooltip={t(
-              'dashboard.edit-pane.annotation.open-query-editor-tooltip',
+              'dashboard.sidebar.annotation.open-query-editor-tooltip',
               'Open the query editor to configure the annotation query'
             )}
             onClick={() => setIsModalOpen(true)}
             size="sm"
             fullWidth
           >
-            <Trans i18nKey="dashboard.edit-pane.annotation.open-query-editor">Open query editor</Trans>
+            <Trans i18nKey="dashboard.sidebar.annotation.open-query-editor">Open query editor</Trans>
           </Button>
           {queryLibraryEnabled && <QueryLibraryButton layer={layer} />}
         </ButtonGroup>
       </Box>
       <Modal
-        title={t('dashboard.edit-pane.annotation.query-editor-modal-title', 'Annotation Query')}
+        title={t('dashboard.sidebar.annotation.query-editor-modal-title', 'Annotation Query')}
         isOpen={isModalOpen}
         onDismiss={() => setIsModalOpen(false)}
       >
@@ -52,7 +52,7 @@ export function AnnotationQueryEditorButton({ layer }: { layer: AnnotationLayer 
         </Stack>
         <Modal.ButtonRow>
           <Button variant="secondary" fill="outline" onClick={() => setIsModalOpen(false)}>
-            <Trans i18nKey="dashboard.edit-pane.annotation.query-editor-close">Close</Trans>
+            <Trans i18nKey="dashboard.sidebar.annotation.query-editor-close">Close</Trans>
           </Button>
         </Modal.ButtonRow>
       </Modal>
@@ -71,7 +71,7 @@ function QueryLibraryButton({ layer, onQuerySelected }: { layer: AnnotationLayer
   const onSelectFromQueryLibrary = useCallback(() => {
     openDrawer({
       options: {
-        context: CoreApp.Dashboard,
+        context: 'dashboard-annotations',
       },
       onSelectQuery: async (selectedQuery: DataQuery) => {
         try {
@@ -128,7 +128,7 @@ function AnnotationDataSourcePicker({ layer }: { layer: AnnotationLayer }) {
           : { ...query, datasource: dsRef };
 
       dashboardEditActions.edit({
-        description: t('dashboard.edit-pane.annotation.change-data-source', 'Change annotation data source'),
+        description: t('dashboard.sidebar.annotation.change-data-source', 'Change annotation data source'),
         source: layer,
         perform: () => {
           layer.setState({ query: newQuery });
@@ -144,7 +144,7 @@ function AnnotationDataSourcePicker({ layer }: { layer: AnnotationLayer }) {
   );
 
   return (
-    <Field label={t('dashboard.edit-pane.annotation.data-source', 'Data source')} noMargin>
+    <Field label={t('dashboard.sidebar.annotation.data-source', 'Data source')} noMargin>
       <DataSourcePicker annotations variables current={query?.datasource} onChange={onDataSourceChange} />
     </Field>
   );

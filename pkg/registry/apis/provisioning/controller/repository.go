@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/grafana/grafana-app-sdk/logging"
@@ -16,19 +17,21 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
 
 	provisioning "github.com/grafana/grafana/apps/provisioning/pkg/apis/provisioning/v0alpha1"
 	"github.com/grafana/grafana/apps/provisioning/pkg/connection"
+	appcontroller "github.com/grafana/grafana/apps/provisioning/pkg/controller"
 	client "github.com/grafana/grafana/apps/provisioning/pkg/generated/clientset/versioned/typed/provisioning/v0alpha1"
-	informer "github.com/grafana/grafana/apps/provisioning/pkg/generated/informers/externalversions/provisioning/v0alpha1"
-	listers "github.com/grafana/grafana/apps/provisioning/pkg/generated/listers/provisioning/v0alpha1"
 	"github.com/grafana/grafana/apps/provisioning/pkg/quotas"
 	"github.com/grafana/grafana/apps/provisioning/pkg/repository"
 	"github.com/grafana/grafana/pkg/apimachinery/identity"
 	"github.com/grafana/grafana/pkg/infra/tracing"
+	"github.com/grafana/grafana/pkg/registry/apis/provisioning/informer"
 	"github.com/grafana/grafana/pkg/registry/apis/provisioning/jobs"
 	"github.com/grafana/grafana/pkg/registry/apis/provisioning/resources"
+	usinformer "github.com/grafana/grafana/pkg/storage/unified/informer"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -38,12 +41,6 @@ const (
 	maxAttempts = 3
 )
 
-type queueItem struct {
-	key      string
-	obj      interface{}
-	attempts int
-}
-
 //go:generate mockery --name finalizerProcessor --structname MockFinalizerProcessor --inpackage --filename finalizer_mock.go --with-expecter
 type finalizerProcessor interface {
 	process(ctx context.Context, repo repository.Repository, finalizers []string) error
@@ -51,10 +48,9 @@ type finalizerProcessor interface {
 
 // RepositoryController controls how and when CRD is established.
 type RepositoryController struct {
-	client     client.ProvisioningV0alpha1Interface
-	repoLister listers.RepositoryLister
-	repoSynced cache.InformerSynced
-	logger     logging.Logger
+	client client.ProvisioningV0alpha1Interface
+	repos  informer.RepositoryGetter
+	logger logging.Logger
 
 	jobs interface {
 		jobs.Queue
@@ -68,23 +64,35 @@ type RepositoryController struct {
 	healthChecker     *RepositoryHealthChecker
 	quotaChecker      *RepositoryQuotaChecker
 	// To allow injection for testing.
-	processFn         func(item *queueItem) error
-	enqueueRepository func(obj any)
+	processFn         func(key string) error
+	enqueueRepository func(obj any, trigger usinformer.ProcessTrigger)
 	keyFunc           func(obj any) (string, error)
 
-	queue           workqueue.TypedRateLimitingInterface[*queueItem]
+	queue           workqueue.TypedRateLimitingInterface[string]
 	resyncInterval  time.Duration
 	minSyncInterval time.Duration
+	drainTimeout    time.Duration
 
-	registry    prometheus.Registerer
-	tracer      tracing.Tracer
-	quotaGetter quotas.QuotaGetter
+	// processed classifies each delivery (encapsulating the NATS/apiserver
+	// backend) and records the processing metrics by what enqueued the key.
+	// triggers carries that attribution from enqueue to dequeue, guarded by
+	// triggersMu (entries live only between enqueue and Forget).
+	processed  *usinformer.ProcessedMetrics
+	triggersMu sync.Mutex
+	triggers   map[string]usinformer.ProcessTrigger
+
+	registry                      prometheus.Registerer
+	tracer                        tracing.Tracer
+	quotaGetter                   quotas.QuotaGetter
+	tokenMetrics                  *repositoryTokenMetrics
+	incrementalPolicy             repository.IncrementalSyncPolicy
+	webhookSecretRotationInterval time.Duration
 }
 
 // NewRepositoryController creates new RepositoryController.
 func NewRepositoryController(
 	provisioningClient client.ProvisioningV0alpha1Interface,
-	repoInformer informer.RepositoryInformer,
+	repos informer.RepositoryGetter,
 	repoFactory repository.Factory,
 	connectionFactory connection.Factory,
 	resourceLister resources.ResourceLister,
@@ -100,55 +108,70 @@ func NewRepositoryController(
 	parallelOperations int,
 	resyncInterval time.Duration,
 	minSyncInterval time.Duration,
+	drainTimeout time.Duration,
 	quotaGetter quotas.QuotaGetter,
-) (*RepositoryController, error) {
+	quotaChecker *RepositoryQuotaChecker,
+	incrementalPolicy repository.IncrementalSyncPolicy,
+	webhookSecretRotationInterval time.Duration,
+	natsBacked bool,
+) *RepositoryController {
 	finalizerMetrics := registerFinalizerMetrics(registry)
+	repoTokenMetrics := registerRepositoryTokenMetrics(registry)
 
 	rc := &RepositoryController{
-		client:     provisioningClient,
-		repoLister: repoInformer.Lister(),
-		repoSynced: repoInformer.Informer().HasSynced,
+		client:    provisioningClient,
+		repos:     repos,
+		processed: usinformer.NewProcessedMetrics(registry, "repositories", natsBacked),
+		triggers:  make(map[string]usinformer.ProcessTrigger),
 		queue: workqueue.NewTypedRateLimitingQueueWithConfig(
-			workqueue.DefaultTypedControllerRateLimiter[*queueItem](),
-			workqueue.TypedRateLimitingQueueConfig[*queueItem]{
+			workqueue.DefaultTypedControllerRateLimiter[string](),
+			workqueue.TypedRateLimitingQueueConfig[string]{
 				Name: "provisioningRepositoryController",
 			},
 		),
 		repoFactory:       repoFactory,
 		connectionFactory: connectionFactory,
 		healthChecker:     healthChecker,
-		quotaChecker:      NewRepositoryQuotaChecker(repoInformer.Lister()),
+		quotaChecker:      quotaChecker,
 		statusPatcher:     statusPatcher,
 		finalizer: &finalizer{
 			lister:        resourceLister,
 			clientFactory: clients,
+			jobs:          jobs,
 			metrics:       &finalizerMetrics,
 			maxWorkers:    parallelOperations,
 		},
-		jobs:            jobs,
-		logger:          logging.DefaultLogger.With("logger", loggerName),
-		registry:        registry,
-		tracer:          tracer,
-		resyncInterval:  resyncInterval,
-		minSyncInterval: minSyncInterval,
-		quotaGetter:     quotaGetter,
-	}
-
-	_, err := repoInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: rc.enqueue,
-		UpdateFunc: func(oldObj, newObj interface{}) {
-			rc.enqueue(newObj)
-		},
-	})
-	if err != nil {
-		return nil, err
+		jobs:                          jobs,
+		logger:                        logging.DefaultLogger.With("logger", loggerName),
+		registry:                      registry,
+		tracer:                        tracer,
+		resyncInterval:                resyncInterval,
+		minSyncInterval:               minSyncInterval,
+		drainTimeout:                  drainTimeout,
+		quotaGetter:                   quotaGetter,
+		tokenMetrics:                  repoTokenMetrics,
+		incrementalPolicy:             incrementalPolicy,
+		webhookSecretRotationInterval: webhookSecretRotationInterval,
 	}
 
 	rc.processFn = rc.process
 	rc.enqueueRepository = rc.enqueue
 	rc.keyFunc = repoKeyFunc
 
-	return rc, nil
+	return rc
+}
+
+// EventHandler returns the informer event handlers for the controller. Register
+// it with the Repository informer to enqueue repositories on add and update.
+func (rc *RepositoryController) EventHandler() cache.ResourceEventHandlerDetailedFuncs {
+	return cache.ResourceEventHandlerDetailedFuncs{
+		AddFunc: func(obj interface{}, isInInitialList bool) {
+			rc.enqueueRepository(obj, rc.processed.ClassifyAdd(objectResourceVersion(obj), isInInitialList))
+		},
+		UpdateFunc: func(oldObj, newObj interface{}) {
+			rc.enqueueRepository(newObj, rc.processed.ClassifyUpdate(objectResourceVersion(oldObj), objectResourceVersion(newObj)))
+		},
+	}
 }
 
 func repoKeyFunc(obj any) (string, error) {
@@ -159,11 +182,24 @@ func repoKeyFunc(obj any) (string, error) {
 	return cache.DeletionHandlingMetaNamespaceKeyFunc(repo)
 }
 
+// objectResourceVersion returns the resource version of a delivered Repository,
+// or "" for a minimal NATS live event or a delete tombstone.
+func objectResourceVersion(obj any) string {
+	if repo, ok := obj.(*provisioning.Repository); ok {
+		return repo.ResourceVersion
+	}
+	return ""
+}
+
 // Run starts the RepositoryController.
+//
+// The onStarted callback is invoked once all workers have been launched.
+// The onShutdown callback is invoked immediately when context cancellation is
+// detected, before draining in-flight work.
 //
 // Note: This function intentionally does NOT create a tracing span because it runs indefinitely
 // until shutdown. Individual processing operations already have their own spans.
-func (rc *RepositoryController) Run(ctx context.Context, workerCount int) {
+func (rc *RepositoryController) Run(ctx context.Context, workerCount int, onStarted func(), onShutdown func()) {
 	defer utilruntime.HandleCrash()
 	defer rc.queue.ShutDown()
 
@@ -172,18 +208,32 @@ func (rc *RepositoryController) Run(ctx context.Context, workerCount int) {
 	logger.Info("Starting RepositoryController")
 	defer logger.Info("Shutting down RepositoryController")
 
-	if !cache.WaitForCacheSync(ctx.Done(), rc.repoSynced) {
-		return
-	}
-
 	logger.Info("Starting workers", "count", workerCount)
 	for i := 0; i < workerCount; i++ {
-		go wait.UntilWithContext(ctx, rc.runWorker, time.Second)
+		workerCtx := logging.Context(ctx, logger.With("worker_id", i))
+		go wait.UntilWithContext(workerCtx, rc.runWorker, time.Second)
 	}
 
 	logger.Info("Started workers")
+	onStarted()
+
 	<-ctx.Done()
-	logger.Info("Shutting down workers")
+	onShutdown()
+	logger.Info("Shutting down workers, draining queue")
+
+	drainDone := make(chan struct{})
+	go func() {
+		rc.queue.ShutDownWithDrain()
+		close(drainDone)
+	}()
+
+	select {
+	case <-drainDone:
+		logger.Info("Queue drained successfully")
+	case <-time.After(rc.drainTimeout):
+		logger.Warn("Drain timeout exceeded, forcing shutdown")
+		rc.queue.ShutDown()
+	}
 }
 
 func (rc *RepositoryController) runWorker(ctx context.Context) {
@@ -191,56 +241,113 @@ func (rc *RepositoryController) runWorker(ctx context.Context) {
 	}
 }
 
-func (rc *RepositoryController) enqueue(obj interface{}) {
+func (rc *RepositoryController) enqueue(obj interface{}, trigger usinformer.ProcessTrigger) {
 	key, err := rc.keyFunc(obj)
 	if err != nil {
 		utilruntime.HandleError(fmt.Errorf("couldn't get key for object: %v", err))
 		return
 	}
+	// Attribute the key before the enqueue so a worker that dequeues immediately
+	// sees it.
+	rc.setTrigger(key, trigger)
+	rc.queue.Add(key)
+}
 
-	item := queueItem{key: key, obj: obj}
-	rc.queue.Add(&item)
+// setTrigger records what enqueued key, first-wins: the enqueue that first
+// queued the key owns the attribution, and later deliveries that coalesce onto
+// the still-queued key (or a retry re-set) leave it alone — the source that
+// actually caused the pickup. The map is lazily created so tests that build the
+// controller as a struct literal need not initialize it.
+func (rc *RepositoryController) setTrigger(key string, trigger usinformer.ProcessTrigger) {
+	rc.triggersMu.Lock()
+	defer rc.triggersMu.Unlock()
+	if rc.triggers == nil {
+		rc.triggers = make(map[string]usinformer.ProcessTrigger)
+	}
+	if _, ok := rc.triggers[key]; !ok {
+		rc.triggers[key] = trigger
+	}
+}
+
+// popTrigger reads and removes key's attribution. Each pickup pops its own entry
+// up front, so the entry never outlives the key however the pickup ends, and a
+// concurrent enqueue that races an in-flight reconcile (setting a fresh entry
+// and marking the key dirty — e.g. a status update the reconcile itself
+// produced) keeps its attribution for the redelivery, which a terminal
+// queue.Forget must not clobber. A retry re-sets the popped trigger before
+// re-queuing so later attempts keep the original attribution.
+func (rc *RepositoryController) popTrigger(key string) (usinformer.ProcessTrigger, bool) {
+	rc.triggersMu.Lock()
+	defer rc.triggersMu.Unlock()
+	trigger, ok := rc.triggers[key]
+	if ok {
+		delete(rc.triggers, key)
+	}
+	return trigger, ok
 }
 
 // processNextWorkItem deals with one key off the queue.
 // It returns false when it's time to quit.
 func (rc *RepositoryController) processNextWorkItem(ctx context.Context) bool {
-	item, quit := rc.queue.Get()
+	key, quit := rc.queue.Get()
 	if quit {
 		return false
 	}
-	defer rc.queue.Done(item)
+	defer rc.queue.Done(key)
 
-	// TODO: should we move tracking work to trace ids instead?
-	logger := logging.FromContext(ctx).With("work_key", item.key)
+	namespace, name, _ := cache.SplitMetaNamespaceKey(key)
+	logger := logging.FromContext(ctx).With("work_key", key, "namespace", namespace, "repository", name)
 	logger.Info("RepositoryController processing key")
 
-	err := rc.processFn(item)
+	// Pop this pickup's attribution up front so the entry is cleared however the
+	// key leaves this function, without a terminal Forget clobbering a newer
+	// attribution set by a concurrent enqueue while the key was in flight.
+	trigger, ok := rc.popTrigger(key)
+
+	// NumRequeues counts prior AddRateLimited calls; add 1 for the current attempt.
+	attempts := rc.queue.NumRequeues(key) + 1
+	// Count the start of processing once per pickup, but only for a pickup that
+	// corresponds to an informer delivery (a present entry). A missing entry is
+	// an internal re-schedule with no informer event behind it — the token
+	// read-after-write AddAfter below re-adds the key without an entry — so it
+	// must not be counted, or it would masquerade as a relist recovery. Retries
+	// keep the entry (re-set below) but bump NumRequeues, so they are not
+	// recounted.
+	if ok && attempts == 1 {
+		rc.processed.RecordProcessed(trigger)
+	}
+
+	err := rc.processFn(key)
 	if err == nil {
-		rc.queue.Forget(item)
+		rc.queue.Forget(key)
 		return true
 	}
 
-	item.attempts++
-	logger = logger.With("error", err, "attempts", item.attempts)
+	logger = logger.With("error", err, "attempts", attempts)
 	logger.Error("RepositoryController failed to process key")
 
-	if item.attempts >= maxAttempts {
+	if attempts >= maxAttempts {
 		logger.Error("RepositoryController failed too many times")
-		rc.queue.Forget(item)
+		rc.queue.Forget(key)
 		return true
 	}
 
 	if !apierrors.IsServiceUnavailable(err) {
 		logger.Info("RepositoryController will not retry")
-		rc.queue.Forget(item)
+		rc.queue.Forget(key)
 		return true
 	} else {
 		logger.Info("RepositoryController will retry as service is unavailable")
 	}
 
-	utilruntime.HandleError(fmt.Errorf("%v failed with: %v", item, err))
-	rc.queue.AddRateLimited(item)
+	utilruntime.HandleError(fmt.Errorf("%v failed with: %v", key, err))
+	// Re-set the attribution the pickup popped so the retry keeps it (unless a
+	// concurrent enqueue set a newer one). Only if this pickup had one: an
+	// internal re-schedule carries no attribution and must not fabricate one.
+	if ok {
+		rc.setTrigger(key, trigger)
+	}
+	rc.queue.AddRateLimited(key)
 
 	return true
 }
@@ -264,13 +371,19 @@ func (rc *RepositoryController) handleDelete(ctx context.Context, obj *provision
 			return fmt.Errorf("process finalizers: %w", err)
 		}
 
-		// remove the finalizers
-		_, err = rc.client.Repositories(obj.GetNamespace()).
-			Patch(ctx, obj.Name, types.JSONPatchType, []byte(`[
+		// remove the finalizers. Retry on optimistic-concurrency conflicts:
+		// the apiserver translates this JSON Patch into a read-modify-write
+		// with PreviousRV set, so concurrent writes on the repository race
+		// with this call and legitimately succeed on retry.
+		err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			_, err := rc.client.Repositories(obj.GetNamespace()).
+				Patch(ctx, obj.Name, types.JSONPatchType, []byte(`[
 					{ "op": "remove", "path": "/metadata/finalizers" }
 				]`), v1.PatchOptions{
-				FieldManager: "provisioning-controller",
-			})
+					FieldManager: "provisioning-controller",
+				})
+			return err
+		})
 		if err != nil {
 			return fmt.Errorf("remove finalizers: %w", err)
 		}
@@ -341,24 +454,24 @@ func (rc *RepositoryController) shouldResync(ctx context.Context, obj *provision
 
 func (rc *RepositoryController) runHooks(ctx context.Context, repo repository.Repository, obj *provisioning.Repository) ([]map[string]interface{}, error) {
 	logger := logging.FromContext(ctx)
-	hooks, _ := repo.(repository.Hooks)
-	if hooks == nil {
+	webhookRepo, ok := repo.(repository.WebhookRepository)
+	if !ok {
 		return nil, nil
 	}
 
 	if obj.Status.ObservedGeneration < 1 {
 		logger.Info("handle repository create")
-		patchOperations, err := hooks.OnCreate(ctx)
+		patchOperations, err := webhookOnCreate(ctx, webhookRepo)
 		if err != nil {
-			return nil, fmt.Errorf("error running OnCreate: %w", err)
+			return nil, fmt.Errorf("error running webhookOnCreate: %w", err)
 		}
 		return patchOperations, nil
 	}
 
 	logger.Info("handle repository spec update", "Generation", obj.Generation, "ObservedGeneration", obj.Status.ObservedGeneration)
-	patchOperations, err := hooks.OnUpdate(ctx)
+	patchOperations, err := webhookOnUpdate(ctx, webhookRepo)
 	if err != nil {
-		return nil, fmt.Errorf("error running OnUpdate: %w", err)
+		return nil, fmt.Errorf("error running webhookOnUpdate: %w", err)
 	}
 
 	return patchOperations, nil
@@ -387,67 +500,82 @@ func (rc *RepositoryController) determineSyncStrategy(
 
 	switch {
 	case !obj.Spec.Sync.Enabled:
-		logger.Info("skip sync as it's disabled")
+		logger.Info("skip sync as it's disabled in the repository spec")
 		return nil
 	case isBlocked:
-		logger.Info("skip sync for repository over quota",
-			"repository", obj.Name,
-			"namespace", obj.Namespace,
-		)
+		logger.Info("skip sync as the repository is blocked for exceeding its namespace quota")
 		return nil
 	case !healthStatus.Healthy:
-		logger.Info("skip sync for unhealthy repository")
+		// Surface why the repository is unhealthy so operators can act without
+		// having to inspect the repository status separately. The health error
+		// type and messages are the same ones exposed on /status/health.
+		logger.Info("skip sync as the repository is unhealthy",
+			"health_error", healthStatus.Error,
+			"health_messages", healthStatus.Message,
+			"health_checked", time.UnixMilli(healthStatus.Checked))
 		return nil
 	case healthStatus.Healthy != obj.Status.Health.Healthy:
-		logger.Info("repository became healthy, full resync")
+		logger.Info("full resync as the repository recovered from an unhealthy state")
 		return &provisioning.SyncJobOptions{}
 	case obj.Status.ObservedGeneration < 1:
-		logger.Info("full sync for new repository")
+		logger.Info("full sync as this is the first sync for a new repository")
 		return &provisioning.SyncJobOptions{}
 	case obj.Generation != obj.Status.ObservedGeneration:
-		logger.Info("full sync for spec change")
+		logger.Info("full sync as the repository spec changed",
+			"generation", obj.Generation, "observed_generation", obj.Status.ObservedGeneration)
 		return &provisioning.SyncJobOptions{}
 	case shouldResync:
 		// Continue to see if we could skip for other reasons
 		versioned, ok := repo.(repository.Versioned)
 		// If the repository is not versioned, we don't have a way to check for incremental updates
 		if !ok {
-			logger.Info("full sync on interval for non-versioned repository")
+			logger.Info("full sync on interval as the repository is not versioned and cannot be diffed incrementally")
 			return &provisioning.SyncJobOptions{}
 		}
 		latestRef, err := versioned.LatestRef(ctx)
 		if err != nil {
-			logger.Warn("incremental sync on interval without knowing if ref has actually changed", "error", err)
+			logger.Warn("falling back to incremental sync on interval as the latest ref could not be resolved to detect changes", "error", err)
 			return &provisioning.SyncJobOptions{Incremental: true}
 		}
 
 		// Only resync if the latest ref is different from the last synced ref
 		if latestRef == obj.Status.Sync.LastRef {
-			logger.Info("skip incremental sync as reference is the same")
+			logger.Info("skip sync on interval as the latest ref matches the last synced ref",
+				"ref", latestRef)
 			return nil
 		}
 
 		// Whenever possible, we try to keep it as an incremental sync to keep things performant.
-		// However, if there are any .keep file deletions inside a folder with no other deletions, we need
-		// to do a full sync to see if the folder was deleted as well in git.
-		incremental, err := shouldUseIncrementalSync(ctx, versioned, obj, latestRef)
+		// However, we fall back to a full sync when incremental diffing cannot safely represent the change,
+		// such as .keep file deletions inside a folder with no other deletions (to detect whether the folder
+		// was deleted in git) or when the diff size reaches/exceeds max_incremental_changes.
+		incremental, err := shouldUseIncrementalSync(ctx, versioned, obj, latestRef, rc.incrementalPolicy)
 		if err != nil {
-			logger.Warn("unable to compare files for incremental sync, doing full sync", "error", err)
+			logger.Warn("falling back to full sync on interval as files could not be compared for an incremental sync",
+				"error", err, "from_ref", obj.Status.Sync.LastRef, "to_ref", latestRef)
 			return &provisioning.SyncJobOptions{}
 		}
 
-		logger.Info("sync on interval", "incremental", incremental)
+		logger.Info("sync on interval as the latest ref changed",
+			"incremental", incremental, "from_ref", obj.Status.Sync.LastRef, "to_ref", latestRef)
 		return &provisioning.SyncJobOptions{Incremental: incremental}
 	default:
 		return nil
 	}
 }
 
-func shouldUseIncrementalSync(ctx context.Context, versioned repository.Versioned, obj *provisioning.Repository, latestRef string) (bool, error) {
+func shouldUseIncrementalSync(
+	ctx context.Context,
+	versioned repository.Versioned,
+	obj *provisioning.Repository,
+	latestRef string,
+	policy repository.IncrementalSyncPolicy,
+) (bool, error) {
 	changes, err := versioned.CompareFiles(ctx, obj.Status.Sync.LastRef, latestRef)
 	if err != nil {
 		return false, err
 	}
+
 	var deletedPaths []string
 	for _, change := range changes {
 		if change.Action == repository.FileActionDeleted {
@@ -455,7 +583,7 @@ func shouldUseIncrementalSync(ctx context.Context, versioned repository.Versione
 		}
 	}
 
-	return repository.CanUseIncrementalSync(deletedPaths), nil
+	return policy.CanUseIncrementalSync(deletedPaths, len(changes)), nil
 }
 
 func (rc *RepositoryController) addSyncJob(ctx context.Context, obj *provisioning.Repository, syncOptions *provisioning.SyncJobOptions) error {
@@ -531,22 +659,32 @@ func (rc *RepositoryController) determineSyncStatusOps(obj *provisioning.Reposit
 }
 
 //nolint:gocyclo
-func (rc *RepositoryController) process(item *queueItem) error {
-	logger := rc.logger.With("key", item.key)
+func (rc *RepositoryController) process(key string) error {
+	logger := rc.logger.With("key", key)
 	ctx := logging.Context(context.Background(), logger)
 
-	namespace, name, err := cache.SplitMetaNamespaceKey(item.key)
+	namespace, name, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
 		return err
 	}
 
-	obj, err := rc.repoLister.Repositories(namespace).Get(name)
+	// Reconcile the object the read seam returns; how it is sourced and kept
+	// fresh is the informer.RepositoryGetter's concern, not the controller's.
+	obj, err := rc.repos.Get(ctx, namespace, name)
 	switch {
 	case apierrors.IsNotFound(err):
-		return errors.New("repository not found in cache")
+		return errors.New("repository not found")
 	case err != nil:
 		return err
 	}
+
+	logger = logger.With(
+		"namespace", namespace,
+		"repository", name,
+		"repositoryType", string(obj.Spec.Type),
+		"connection", obj.ConnectionName(),
+	)
+	ctx = logging.Context(ctx, logger)
 
 	ctx, _, err = identity.WithProvisioningIdentity(ctx, namespace)
 	if err != nil {
@@ -557,6 +695,12 @@ func (rc *RepositoryController) process(item *queueItem) error {
 
 	if obj.DeletionTimestamp != nil {
 		return rc.handleDelete(ctx, obj)
+	}
+
+	// Skip reconciliation for resources whose namespace is being soft-deleted.
+	if appcontroller.IsPendingDelete(obj.Labels) {
+		logger.Info("skipping reconciliation: namespace is pending deletion")
+		return nil
 	}
 
 	// Check quota state early - before trigger evaluation
@@ -580,17 +724,23 @@ func (rc *RepositoryController) process(item *queueItem) error {
 	hasSpecChanged := obj.Generation != obj.Status.ObservedGeneration
 	var patchOperations []map[string]interface{}
 
+	hasQuotaChanged := obj.Status.Quota.MaxRepositories != newQuota.MaxRepositories ||
+		obj.Status.Quota.MaxResourcesPerRepository != newQuota.MaxResourcesPerRepository
+
 	var shouldGenerateToken bool
 	if obj.Spec.Connection != nil && obj.Spec.Connection.Name != "" {
 		shouldGenerateToken = rc.shouldGenerateTokenFromConnection(obj)
 	}
 
+	shouldRotateWebhookSecret := rc.shouldRotateWebhookSecret(obj)
+
 	// Determine the main triggering condition
 	switch {
-	// First, we check if the repository is blocked and return early in such a case.
+	// First, we check if the repository is blocked
 	case isCurrentlyBlocked && isOverQuota:
-		logger.Info("repository blocked and over quota, skipping reconciliation")
-		return nil
+		logger.Info("repository blocked and over quota, reconciling but skipping sync")
+	case !isCurrentlyBlocked && isOverQuota:
+		logger.Info("namespace over quota, blocking repository", "max_repositories", newQuota.MaxRepositories)
 	case hasSpecChanged:
 		logger.Info("spec changed", "Generation", obj.Generation, "ObservedGeneration", obj.Status.ObservedGeneration)
 	case shouldResync:
@@ -601,6 +751,12 @@ func (rc *RepositoryController) process(item *queueItem) error {
 		logger.Info("repository was blocked but now within quota, processing to unblock")
 	case shouldGenerateToken:
 		logger.Info("repository token needs to be generated", "connection", obj.Spec.Connection.Name)
+	case hasQuotaChanged:
+		logger.Info("quota changed", "quota", newQuota)
+	case len(obj.Spec.Workflows) > 0 && repository.GetID(obj.Status.Webhook).IsEmpty():
+		logger.Info("webhook missing, reconciling")
+	case shouldRotateWebhookSecret:
+		logger.Info("webhook secret rotation due")
 	default:
 		logger.Info("skipping as conditions are not met", "status", obj.Status, "generation", obj.Generation, "sync_spec", obj.Spec.Sync)
 		return nil
@@ -617,8 +773,7 @@ func (rc *RepositoryController) process(item *queueItem) error {
 	}
 
 	// Set quota information from configuration (only if changed)
-	if obj.Status.Quota.MaxRepositories != newQuota.MaxRepositories ||
-		obj.Status.Quota.MaxResourcesPerRepository != newQuota.MaxResourcesPerRepository {
+	if hasQuotaChanged {
 		patchOperations = append(patchOperations, map[string]interface{}{
 			"op":    "replace",
 			"path":  "/status/quota",
@@ -626,68 +781,18 @@ func (rc *RepositoryController) process(item *queueItem) error {
 		})
 	}
 
-	if conditionPatchOps := BuildConditionPatchOpsFromExisting(
-		obj.Status.Conditions, obj.GetGeneration(), quotaCondition,
-	); conditionPatchOps != nil {
-		patchOperations = append(patchOperations, conditionPatchOps...)
-	}
-
-	// Repository needs to be blocked.
-	if !isCurrentlyBlocked && isOverQuota {
-		// Rule 1: Not blocked + over quota -> Block and exit
-		logger.Info("namespace over quota, blocking repository",
-			"namespace", namespace,
-			"max_repositories", newQuota.MaxRepositories,
-		)
-
-		// Mark the repository as unhealthy
-		patchOperations = append(patchOperations, map[string]interface{}{
-			"op":   "replace",
-			"path": "/status/health",
-			"value": provisioning.HealthStatus{
-				Healthy: false,
-				Error:   provisioning.HealthFailureHealth,
-				Checked: time.Now().UnixMilli(),
-				Message: []string{quotaCondition.Message},
-			},
-		})
-
-		// Apply patch and exit
-		if len(patchOperations) > 0 {
-			if err := rc.statusPatcher.Patch(ctx, obj, patchOperations...); err != nil {
-				return fmt.Errorf("status patch operations failed: %w", err)
-			}
-		}
-		return nil
-	}
-
-	// We're unblocking the repository. Here - we should set the condition correctly, to match this case.
-	if forceProcessForUnblock {
-		if conditionPatchOps := BuildConditionPatchOpsFromExisting(
-			obj.Status.Conditions, obj.GetGeneration(), quotaCondition,
-		); conditionPatchOps != nil {
-			patchOperations = append(patchOperations, conditionPatchOps...)
-		}
-	}
-
 	if shouldGenerateToken {
-		logger.Info("updating token for repository", "connection", obj.Spec.Connection.Name)
+		logger.Info("updating token for repository")
 
 		c, err := rc.client.Connections(obj.Namespace).Get(ctx, obj.Spec.Connection.Name, v1.GetOptions{})
 		if err != nil {
-			logger.Error("retrieving connection",
-				"connection", obj.Spec.Connection.Name,
-				"error", err,
-			)
+			logger.Error("retrieving connection", "error", err)
 			return err
 		}
 
 		token, tokenOps, err := rc.generateRepositoryToken(ctx, obj, c)
 		if err != nil {
-			logger.Error("generating token for repository",
-				"connection", obj.Spec.Connection.Name,
-				"error", err,
-			)
+			logger.Error("generating token for repository", "error", err)
 			return err
 		}
 
@@ -695,13 +800,52 @@ func (rc *RepositoryController) process(item *queueItem) error {
 			patchOperations = append(patchOperations, tokenOps...)
 		}
 
-		// Adding secure token to object as it will be used for healthchecks and hooks process
 		obj.Secure.Token.Create = token
 	}
 
 	repo, err := rc.repoFactory.Build(ctx, obj)
 	if err != nil {
-		return fmt.Errorf("unable to create repository from configuration: %w", err)
+		// The token references a stored secret that could not be decrypted (e.g. an
+		// orphaned reference whose secret was deleted). When the token is minted from a
+		// connection, regenerate it and rebuild rather than failing the reconcile forever.
+		// shouldGenerateToken being false guarantees we did not already mint one this pass.
+		if errors.Is(err, repository.ErrTokenNotFound) && !shouldGenerateToken &&
+			obj.Spec.Connection != nil && obj.Spec.Connection.Name != "" {
+			// If we wrote a token for this repository very recently, its secret may not be
+			// readable from the store yet. Wait for it rather than regenerating, which would
+			// delete it and can loop under secret-store read-after-write lag.
+			if tokenRecentlyCreated(time.UnixMilli(obj.Status.Token.LastUpdated)) {
+				logger.Info("repository token secret not yet readable after recent write; will retry", "error", err)
+				rc.queue.AddAfter(key, tokenWriteRetryDelay)
+				return nil
+			}
+
+			logger.Warn("repository token secret could not be decrypted, regenerating from connection",
+				"connection", obj.Spec.Connection.Name, "error", err)
+
+			c, cerr := rc.client.Connections(obj.Namespace).Get(ctx, obj.Spec.Connection.Name, v1.GetOptions{})
+			if cerr != nil {
+				return fmt.Errorf("retrieving connection to regenerate token: %w", cerr)
+			}
+
+			token, tokenOps, gerr := rc.generateRepositoryToken(ctx, obj, c)
+			if gerr != nil {
+				return fmt.Errorf("regenerating repository token: %w", gerr)
+			}
+
+			if len(tokenOps) > 0 {
+				patchOperations = append(patchOperations, tokenOps...)
+			}
+			// Work on a copy so we don't mutate the shared informer-cache object, and
+			// overwrite the whole value so the stale reference name is cleared too.
+			obj = obj.DeepCopy()
+			obj.Secure.Token = common.InlineSecureValue{Create: token}
+
+			repo, err = rc.repoFactory.Build(ctx, obj)
+		}
+		if err != nil {
+			return fmt.Errorf("unable to create repository from configuration: %w", err)
+		}
 	}
 
 	// Handle hooks - may return early if hooks fail
@@ -714,6 +858,17 @@ func (rc *RepositoryController) process(item *queueItem) error {
 	}
 	if len(hookOps) > 0 {
 		patchOperations = append(patchOperations, hookOps...)
+	}
+
+	// Rotate webhook secret if due.
+	if webhookRepo, ok := repo.(repository.WebhookRepository); ok && shouldRotateWebhookSecret {
+		rotateOps, err := rotateWebhookSecret(ctx, webhookRepo)
+		if err != nil {
+			logger.Warn("webhook secret rotation failed", "error", err)
+		}
+		if len(rotateOps) > 0 {
+			patchOperations = append(patchOperations, rotateOps...)
+		}
 	}
 
 	// If branch is empty, fetch and set the default branch before running health check
@@ -737,14 +892,35 @@ func (rc *RepositoryController) process(item *queueItem) error {
 	}
 
 	// Handle health checks using the health checker
-	testResults, healthStatus, healthPatchOps, err := rc.healthChecker.RefreshHealthWithPatchOps(ctx, repo)
+	healthResult, err := rc.healthChecker.RefreshHealthWithPatchOps(ctx, repo)
 	if err != nil {
 		return fmt.Errorf("update health status: %w", err)
 	}
+	testResults := healthResult.TestResults
+	healthStatus := healthResult.HealthStatus
 
-	// Add health patch operations first
-	if len(healthPatchOps) > 0 {
-		patchOperations = append(patchOperations, healthPatchOps...)
+	// If over quota, override health to unhealthy.
+	if isOverQuota {
+		healthStatus = provisioning.HealthStatus{
+			Healthy: false,
+			Error:   provisioning.HealthFailureHealth,
+			Checked: time.Now().UnixMilli(),
+			Message: []string{quotaCondition.Message},
+		}
+		patchOperations = append(patchOperations, map[string]interface{}{
+			"op":    "replace",
+			"path":  "/status/health",
+			"value": healthStatus,
+		})
+	} else if len(healthResult.PatchOps) > 0 {
+		patchOperations = append(patchOperations, healthResult.PatchOps...)
+	}
+
+	// Build ALL condition patches together to avoid one overwriting another.
+	if conditionPatchOps := BuildConditionPatchOpsFromExisting(
+		obj.Status.Conditions, obj.GetGeneration(), quotaCondition, healthResult.ReadyCondition,
+	); conditionPatchOps != nil {
+		patchOperations = append(patchOperations, conditionPatchOps...)
 	}
 
 	// Update fieldErrors from test results - always update to ensure fieldErrors are cleared when there are no errors
@@ -787,10 +963,17 @@ func (rc *RepositoryController) process(item *queueItem) error {
 // processHooks handles hook execution with intelligent retry logic
 // Returns hook operations, whether processing should continue, and any error
 func (rc *RepositoryController) processHooks(ctx context.Context, repo repository.Repository, obj *provisioning.Repository) ([]map[string]interface{}, bool, error) {
-	shouldRunHooks := obj.Generation != obj.Status.ObservedGeneration
+	webhookMissing := len(obj.Spec.Workflows) > 0 &&
+		repository.GetID(obj.Status.Webhook).IsEmpty()
 
-	// Skip hooks if status already indicates recent hook failure to avoid infinite retry
-	if shouldRunHooks && rc.healthChecker.HasRecentFailure(obj.Status.Health, provisioning.HealthFailureHook) {
+	shouldRunHooks := (obj.Generation != obj.Status.ObservedGeneration) || webhookMissing
+
+	// Suppress the hook retry while the hook-failure cooldown is active. If the
+	// spec no longer expects a webhook, the cooldown does not apply: we let the
+	// hook handler run (so it can clean up any previously-created webhook) and
+	// do not block recovery from a stale HealthFailureHook on the next
+	// reconcile.
+	if shouldRunHooks && rc.healthChecker.inHookFailureCooldown(obj) {
 		shouldRunHooks = false
 	}
 
@@ -810,6 +993,25 @@ func (rc *RepositoryController) processHooks(ctx context.Context, repo repositor
 	return hookOps, true, nil
 }
 
+// shouldRotateWebhookSecret returns true when a repository has an active webhook
+// whose secret is due for rotation based on the configured interval.
+func (rc *RepositoryController) shouldRotateWebhookSecret(obj *provisioning.Repository) bool {
+	if rc.webhookSecretRotationInterval <= 0 {
+		return false
+	}
+	if len(obj.Spec.Workflows) == 0 {
+		return false
+	}
+	if repository.GetID(obj.Status.Webhook).IsEmpty() {
+		return false
+	}
+	if obj.Status.Webhook.LastRotated == 0 {
+		return true
+	}
+	age := time.Since(time.UnixMilli(obj.Status.Webhook.LastRotated))
+	return age >= rc.webhookSecretRotationInterval
+}
+
 // HACK: we need a proper way of doing this check by adding Conditions
 // We're going to work on this in https://github.com/grafana/git-ui-sync-project/issues/744.
 func (rc *RepositoryController) shouldGenerateTokenFromConnection(
@@ -821,20 +1023,37 @@ func (rc *RepositoryController) shouldGenerateTokenFromConnection(
 	// - The token has not been recently created, and
 	// - The token will expire before the next resync interval
 	if obj.Secure.Token.IsZero() {
+		rc.tokenMetrics.recordRefreshReason(refreshReasonMissing)
 		return true
 	}
 
+	expiration := time.UnixMilli(obj.Status.Token.Expiration)
+	rc.tokenMetrics.recordTimeToExpiry(time.Until(expiration).Seconds())
+
 	recentlyCreated := tokenRecentlyCreated(time.UnixMilli(obj.Status.Token.LastUpdated))
-	shouldRefresh := shouldRefreshBeforeExpiration(time.UnixMilli(obj.Status.Token.Expiration), rc.resyncInterval)
-	return !recentlyCreated &&
-		shouldRefresh
+	if !recentlyCreated && shouldRefreshBeforeExpiration(expiration, rc.resyncInterval) {
+		rc.tokenMetrics.recordRefreshReason(refreshReasonExpiring)
+		return true
+	}
+
+	return false
 }
 
 func (rc *RepositoryController) generateRepositoryToken(
 	ctx context.Context,
 	obj *provisioning.Repository,
 	c *provisioning.Connection,
-) (common.RawSecureValue, []map[string]any, error) {
+) (_ common.RawSecureValue, _ []map[string]any, err error) {
+	start := time.Now()
+	defer func() {
+		elapsed := time.Since(start).Seconds()
+		if err != nil {
+			rc.tokenMetrics.recordGenerationError()
+		} else {
+			rc.tokenMetrics.recordGeneration(elapsed)
+		}
+	}()
+
 	conn, err := rc.connectionFactory.Build(ctx, c)
 	if err != nil {
 		return "", nil, fmt.Errorf("unable to create connection from configuration: %w", err)

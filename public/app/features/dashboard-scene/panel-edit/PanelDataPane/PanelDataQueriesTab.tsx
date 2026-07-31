@@ -1,22 +1,22 @@
 import { useCallback, useMemo } from 'react';
 
-import { CoreApp, DataSourceApi, DataSourceInstanceSettings, getDataSourceRef } from '@grafana/data';
+import { CoreApp, type DataSourceApi, type DataSourceInstanceSettings, getDataSourceRef } from '@grafana/data';
 import { selectors } from '@grafana/e2e-selectors';
 import { t, Trans } from '@grafana/i18n';
 import { config, getDataSourceSrv, reportInteraction } from '@grafana/runtime';
 import {
-  SceneComponentProps,
-  SceneDataQuery,
+  SafeSerializableSceneObject,
+  type SceneComponentProps,
+  type SceneDataQuery,
   sceneGraph,
   SceneObjectBase,
-  SceneObjectRef,
-  SceneObjectState,
-  SceneQueryRunner,
-  VizPanel,
+  type SceneObjectRef,
+  type SceneObjectState,
+  type SceneQueryRunner,
+  type VizPanel,
 } from '@grafana/scenes';
-import { DataQuery, DataSourceRef } from '@grafana/schema';
+import { type DataQuery, type DataSourceRef } from '@grafana/schema';
 import { Button, Stack, Tab } from '@grafana/ui';
-import { contextSrv } from 'app/core/services/context_srv';
 import { addQuery } from 'app/core/utils/query';
 import { getLastUsedDatasourceFromStorage } from 'app/features/dashboard/utils/dashboard';
 import { storeLastUsedDataSourceInLocalStorage } from 'app/features/datasources/components/picker/utils';
@@ -30,25 +30,28 @@ import { QueryEditorRows } from 'app/features/query/components/QueryEditorRows';
 import { QueryGroupTopSection } from 'app/features/query/components/QueryGroup';
 import { updateQueries } from 'app/features/query/state/updateQueries';
 import { isSharedDashboardQuery } from 'app/plugins/datasource/dashboard/runSharedRequest';
-import { AccessControlAction } from 'app/types/accessControl';
-import { QueryGroupOptions } from 'app/types/query';
+import { type QueryGroupOptions } from 'app/types/query';
 
 import { MIXED_DATASOURCE_NAME } from '../../../../plugins/datasource/mixed/MixedDataSource';
 import { useQueryLibraryContext } from '../../../explore/QueryLibrary/QueryLibraryContext';
+import { hasSavedQueryReadPermissions } from '../../../explore/QueryLibrary/utils/identity';
 import { ExpressionDatasourceUID } from '../../../expressions/types';
 import { getDatasourceSrv } from '../../../plugins/datasource_srv';
 import { PanelInspectDrawer } from '../../inspect/PanelInspectDrawer';
 import { PanelTimeRange } from '../../scene/panel-timerange/PanelTimeRange';
+import { getUpdatedHoverHeader } from '../../scene/panel-timerange/utils';
 import { getDashboardSceneFor, getQueryRunnerFor } from '../../utils/utils';
-import { getUpdatedHoverHeader } from '../getPanelFrameOptions';
+import { trackAddQuery } from '../PanelEditNext/tracking';
 
-import { PanelDataPaneTab, PanelDataTabHeaderProps, TabId } from './types';
+import { type PanelDataPaneTab, type PanelDataTabHeaderProps, TabId } from './types';
 import { hasBackendDatasource } from './utils';
 
 interface PanelDataQueriesTabState extends SceneObjectState {
   datasource?: DataSourceApi;
   dsSettings?: DataSourceInstanceSettings;
   panelRef: SceneObjectRef<VizPanel>;
+  /** refId of a query row to scroll into view once it renders; cleared after the scroll happens. */
+  scrollToRefId?: string;
 }
 export class PanelDataQueriesTab extends SceneObjectBase<PanelDataQueriesTabState> implements PanelDataPaneTab {
   static Component = PanelDataQueriesTabRendered;
@@ -75,6 +78,16 @@ export class PanelDataQueriesTab extends SceneObjectBase<PanelDataQueriesTabStat
     this.loadDataSource();
   }
 
+  /**
+   * Returns scoped vars with the panel's scene object so that datasource resolution
+   * via templateSrv.replace() can find section-level variables (row/tab scoped)
+   * in addition to dashboard-level variables.
+   */
+  public getPanelContext() {
+    const panel = this.state.panelRef.resolve();
+    return { __sceneObject: new SafeSerializableSceneObject(panel) };
+  }
+
   private async loadDataSource() {
     const panel = this.state.panelRef.resolve();
     const dataObj = panel.state.$data;
@@ -84,6 +97,7 @@ export class PanelDataQueriesTab extends SceneObjectBase<PanelDataQueriesTabStat
     }
 
     let datasourceToLoad = this.queryRunner.state.datasource;
+    const panelContext = this.getPanelContext();
 
     try {
       let datasource: DataSourceApi | undefined;
@@ -108,12 +122,15 @@ export class PanelDataQueriesTab extends SceneObjectBase<PanelDataQueriesTabStat
         // do we have a last used datasource for this dashboard
         if (lastUsedDatasource?.datasourceUid !== null) {
           // get datasource from dashbopard uid
-          dsSettings = getDataSourceSrv().getInstanceSettings({ uid: lastUsedDatasource?.datasourceUid });
+          dsSettings = getDataSourceSrv().getInstanceSettings({ uid: lastUsedDatasource?.datasourceUid }, panelContext);
           if (dsSettings) {
-            datasource = await getDataSourceSrv().get({
-              uid: lastUsedDatasource?.datasourceUid,
-              type: dsSettings.type,
-            });
+            datasource = await getDataSourceSrv().get(
+              {
+                uid: lastUsedDatasource?.datasourceUid,
+                type: dsSettings.type,
+              },
+              panelContext
+            );
 
             this.queryRunner.setState({
               datasource: {
@@ -124,8 +141,8 @@ export class PanelDataQueriesTab extends SceneObjectBase<PanelDataQueriesTabStat
           }
         }
       } else {
-        datasource = await getDataSourceSrv().get(datasourceToLoad);
-        dsSettings = getDataSourceSrv().getInstanceSettings(datasourceToLoad);
+        datasource = await getDataSourceSrv().get(datasourceToLoad, panelContext);
+        dsSettings = getDataSourceSrv().getInstanceSettings(datasourceToLoad, panelContext);
       }
 
       if (datasource && dsSettings) {
@@ -196,9 +213,10 @@ export class PanelDataQueriesTab extends SceneObjectBase<PanelDataQueriesTabStat
   public onChangeDataSource = async (newSettings: DataSourceInstanceSettings, defaultQueries?: SceneDataQuery[]) => {
     const { dsSettings } = this.state;
     const queryRunner = this.queryRunner;
+    const panelContext = this.getPanelContext();
 
-    const currentDS = dsSettings ? await getDataSourceSrv().get({ uid: dsSettings.uid }) : undefined;
-    const nextDS = await getDataSourceSrv().get({ uid: newSettings.uid });
+    const currentDS = dsSettings ? await getDataSourceSrv().get({ uid: dsSettings.uid }, panelContext) : undefined;
+    const nextDS = await getDataSourceSrv().get({ uid: newSettings.uid }, panelContext);
 
     const currentQueries = queryRunner.state.queries;
 
@@ -232,10 +250,12 @@ export class PanelDataQueriesTab extends SceneObjectBase<PanelDataQueriesTabStat
     const timeFrom = options.timeRange?.from ?? undefined;
     const timeShift = options.timeRange?.shift ?? undefined;
     const hideTimeOverride = options.timeRange?.hide;
+    const compareWith =
+      panel.state.$timeRange instanceof PanelTimeRange ? panel.state.$timeRange.state.compareWith : undefined;
 
-    if (timeFrom !== undefined || timeShift !== undefined) {
-      panelStateUpdate.$timeRange = new PanelTimeRange({ timeFrom, timeShift, hideTimeOverride });
-      panelStateUpdate.hoverHeader = getUpdatedHoverHeader(panel.state.title, panelStateUpdate.$timeRange);
+    if (timeFrom !== undefined || timeShift !== undefined || compareWith) {
+      panelStateUpdate.$timeRange = new PanelTimeRange({ timeFrom, timeShift, hideTimeOverride, compareWith });
+      panelStateUpdate.hoverHeader = getUpdatedHoverHeader(panel.state.title, panelStateUpdate.$timeRange?.state);
     } else {
       panelStateUpdate.$timeRange = undefined;
       panelStateUpdate.hoverHeader = getUpdatedHoverHeader(panel.state.title, undefined);
@@ -289,6 +309,7 @@ export class PanelDataQueriesTab extends SceneObjectBase<PanelDataQueriesTabStat
 
   public addQueryClick = () => {
     const queries = this.getQueries();
+    trackAddQuery('new_query', 'legacy', { silent: true });
     this.onQueriesChange(addQuery(queries, this.newQuery()));
   };
 
@@ -305,7 +326,7 @@ export class PanelDataQueriesTab extends SceneObjectBase<PanelDataQueriesTabStat
     return (dsSettings.meta.backend || dsSettings.meta.alerting || dsSettings.meta.mixed) === true;
   }
 
-  public onAddExpressionOfType = (type: ExpressionQueryType) => {
+  public onAddExpressionOfType = (type: ExpressionQueryType): string => {
     const queries = this.getQueries();
     // Create base expression query with the specified type
     const baseQuery = expressionDatasource.newQuery();
@@ -313,7 +334,10 @@ export class PanelDataQueriesTab extends SceneObjectBase<PanelDataQueriesTabStat
     // Apply defaults specific to the expression type
     const queryWithDefaults = getDefaults(queryWithType);
 
-    this.onQueriesChange(addQuery(queries, queryWithDefaults));
+    const newQueries = addQuery(queries, queryWithDefaults);
+    this.onQueriesChange(newQueries);
+
+    return newQueries[newQueries.length - 1].refId;
   };
 
   public renderExtraActions() {
@@ -349,12 +373,10 @@ export class PanelDataQueriesTab extends SceneObjectBase<PanelDataQueriesTabStat
 }
 
 export function PanelDataQueriesTabRendered({ model }: SceneComponentProps<PanelDataQueriesTab>) {
-  const { datasource, dsSettings } = model.useState();
+  const { datasource, dsSettings, scrollToRefId } = model.useState();
   const { data, queries, datasource: datasourceState } = model.queryRunner.useState();
   const { openDrawer: openQueryLibraryDrawer, queryLibraryEnabled } = useQueryLibraryContext();
-  const canReadQueries = config.featureToggles.savedQueriesRBAC
-    ? contextSrv.hasPermission(AccessControlAction.QueriesRead)
-    : contextSrv.isSignedIn;
+  const canReadQueries = hasSavedQueryReadPermissions();
 
   const handleAddExpression = useCallback(
     (type: ExpressionQueryType) => {
@@ -367,6 +389,10 @@ export function PanelDataQueriesTabRendered({ model }: SceneComponentProps<Panel
     },
     [model]
   );
+
+  const handleScrollIntoView = useCallback(() => {
+    model.setState({ scrollToRefId: undefined });
+  }, [model]);
 
   // Determine which expressions should be disabled (for frontend-only datasources)
   const disabledExpressions = useMemo(() => {
@@ -418,6 +444,7 @@ export function PanelDataQueriesTabRendered({ model }: SceneComponentProps<Panel
         dsSettings={dsSettings}
         dataSource={datasource}
         options={model.buildQueryOptions()}
+        scopedVars={model.getPanelContext()}
         onDataSourceChange={model.onChangeDataSource}
         onOptionsChange={model.onQueryOptionsChange}
         onOpenQueryInspector={model.onOpenInspector}
@@ -433,6 +460,8 @@ export function PanelDataQueriesTabRendered({ model }: SceneComponentProps<Panel
         onUpdateDatasources={queryLibraryEnabled ? model.updateDatasourceIfNeeded : undefined}
         app={CoreApp.PanelEditor}
         panelRef={model.state.panelRef}
+        scrollToRefId={scrollToRefId}
+        onScrollIntoView={handleScrollIntoView}
       />
 
       <Stack gap={2}>

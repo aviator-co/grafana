@@ -1,40 +1,54 @@
+import { throttle } from 'lodash';
+
 import {
   CoreApp,
-  DataSourceApi,
-  DataSourceInstanceSettings,
-  DataTransformerConfig,
+  type DataSourceApi,
+  type DataSourceInstanceSettings,
+  type DataTransformerConfig,
   getDataSourceRef,
   getNextRefId,
+  type ScopedVars,
 } from '@grafana/data';
-import { config, getDataSourceSrv } from '@grafana/runtime';
+import { config, isExpressionReference, reportInteraction } from '@grafana/runtime';
+import { getDataSourceInstance, getDataSourceInstanceSettings } from '@grafana/runtime/unstable';
 import {
   SceneDataTransformer,
   SceneObjectBase,
-  SceneObjectRef,
-  SceneObjectState,
-  SceneQueryRunner,
-  VizPanel,
+  type SceneObjectRef,
+  type SceneObjectState,
+  type SceneQueryRunner,
+  type VizPanel,
 } from '@grafana/scenes';
-import { DataQuery, DataSourceRef } from '@grafana/schema';
+import { type DataQuery, type DataSourceRef } from '@grafana/schema';
 import { addQuery } from 'app/core/utils/query';
 import { getLastUsedDatasourceFromStorage } from 'app/features/dashboard/utils/dashboard';
 import { storeLastUsedDataSourceInLocalStorage } from 'app/features/datasources/components/picker/utils';
 import { MIXED_DATASOURCE_NAME } from 'app/plugins/datasource/mixed/MixedDataSource';
-import { QueryGroupOptions } from 'app/types/query';
+import { type QueryGroupOptions } from 'app/types/query';
 
 import { PanelTimeRange } from '../../scene/panel-timerange/PanelTimeRange';
+import { getUpdatedHoverHeader } from '../../scene/panel-timerange/utils';
 import { getDashboardSceneFor, getQueryRunnerFor } from '../../utils/utils';
-import { getUpdatedHoverHeader } from '../getPanelFrameOptions';
 
 import { QueryEditorContent } from './QueryEditor/QueryEditorContent';
-import { filterDataTransformerConfigs } from './QueryEditor/utils';
+import { filterDataTransformerConfigs, getPanelScopedVars } from './QueryEditor/utils';
+import { TRANSFORMATION_EDIT_INTERACTION_THROTTLE_TIME } from './constants';
+
+const reportTransformationEditInteraction = throttle((context: string, type: string) => {
+  reportInteraction('grafana_panel_transformations_clicked', {
+    context,
+    type,
+    action: 'edit',
+  });
+}, TRANSFORMATION_EDIT_INTERACTION_THROTTLE_TIME);
 
 /**
  * Resolve the datasource ref to assign to a new query.
  */
 function resolveNewQueryDatasource(
   callerDs: DataSourceRef | undefined,
-  panelDsSettings: DataSourceInstanceSettings | undefined
+  panelDsSettings: DataSourceInstanceSettings | undefined,
+  defaultDatasourceRef: DataSourceRef | undefined
 ): DataSourceRef | undefined {
   // Caller explicitly chose a datasource (e.g. ExpressionDatasourceRef).
   if (callerDs) {
@@ -45,15 +59,34 @@ function resolveNewQueryDatasource(
     return undefined;
   }
 
-  // "Mixed" isn't meaningful on a per-query basis; use the configured default.
-  // If missing a default datasource (unexpected), leave `undefined`
-  // so the query inherits the panel datasource at render time.
+  // "Mixed" isn't meaningful on a per-query basis; use the configured default, which is
+  // pre-resolved into state on activation (see resolveDefaultDatasourceRef) so this stays
+  // synchronous. If the default is missing (unexpected), leave `undefined` so the query
+  // inherits the panel datasource at render time.
   if (panelDsSettings.meta.mixed) {
-    const defaultDs = getDataSourceSrv().getInstanceSettings(config.defaultDatasource);
-    return defaultDs ? getDataSourceRef(defaultDs) : undefined;
+    return defaultDatasourceRef;
   }
 
   return getDataSourceRef(panelDsSettings);
+}
+
+/**
+ * When in Mixed mode, checks if all non-expression queries share the same datasource.
+ * Returns that common datasource ref if they do, or undefined if queries are heterogeneous.
+ */
+function getUniformDatasource(queries: DataQuery[]): DataSourceRef | undefined {
+  const regularQueries = queries.filter((q) => !isExpressionReference(q.datasource));
+  if (regularQueries.length === 0) {
+    return undefined;
+  }
+
+  const firstDs = regularQueries[0].datasource;
+  if (!firstDs?.uid) {
+    return undefined;
+  }
+
+  const allSame = regularQueries.every((q) => q.datasource?.uid === firstDs.uid);
+  return allSame ? { ...firstDs } : undefined;
 }
 
 export interface PanelDataPaneNextState extends SceneObjectState {
@@ -61,6 +94,11 @@ export interface PanelDataPaneNextState extends SceneObjectState {
   datasource?: DataSourceApi;
   dsSettings?: DataSourceInstanceSettings;
   dsError?: Error;
+  /**
+   * The configured default datasource ref, pre-resolved on activation. Lets the synchronous
+   * addQuery path assign the default in Mixed mode without an async lookup.
+   */
+  defaultDatasourceRef?: DataSourceRef;
 }
 
 /**
@@ -76,8 +114,14 @@ export class PanelDataPaneNext extends SceneObjectBase<PanelDataPaneNextState> {
     this.addActivationHandler(() => this.onActivate());
   }
 
+  /** Scene scope for resolving section-scoped (row/tab) datasource variables. See {@link getPanelScopedVars}. */
+  private getPanelContext(): ScopedVars {
+    return getPanelScopedVars(this.state.panelRef.resolve());
+  }
+
   private onActivate() {
-    this.loadDatasource();
+    this.resolveDefaultDatasourceRef();
+    this.resolveDatasourceRef().then((resolvedRef) => this.loadDatasource(resolvedRef));
 
     // Subscribe to datasource changes on the queryRunner
     const queryRunner = getQueryRunnerFor(this.state.panelRef.resolve());
@@ -92,7 +136,67 @@ export class PanelDataPaneNext extends SceneObjectBase<PanelDataPaneNextState> {
     }
   }
 
-  private async loadDatasource() {
+  /**
+   * Pre-resolve the configured default datasource ref so the synchronous addQuery path
+   * (resolveNewQueryDatasource) can assign it in Mixed mode without an async lookup.
+   */
+  private async resolveDefaultDatasourceRef() {
+    const defaultDsSettings = await getDataSourceInstanceSettings(config.defaultDatasource);
+    if (defaultDsSettings) {
+      this.setState({ defaultDatasourceRef: getDataSourceRef(defaultDsSettings) });
+    }
+  }
+
+  /**
+   * Resolves a datasource ref to use when queryRunner has no explicit datasource set.
+   * Returns the resolved ref without mutating queryRunner — the caller passes it to loadDatasource.
+   *
+   * In Grafana's data model, null/undefined is a valid datasource ref meaning "use the default."
+   * Panels stored this way (the common case for any panel that never had an explicit datasource
+   * selection) arrive with queryRunner.state.datasource unset. Without this step, loadDatasource
+   * has nothing to load, silently leaves panelDsSettings undefined, and the query editor shows
+   * "Failed to load datasource" for every query that inherits its datasource from the panel.
+   *
+   * We deliberately do NOT write back to queryRunner here. Writing to queryRunner would bleed into
+   * the dashboard save path (both V1 and V2 serializers read queryRunner.state.datasource), silently
+   * persisting an explicit datasource UID onto panels that were saved with none.
+   *
+   * Resolution priority (mirrors legacy PanelEditorQueries.componentDidMount):
+   *   1. Already set on queryRunner — returns undefined (loadDatasource will use it directly).
+   *   2. Inferred from the first query's explicit datasource — returns undefined (same).
+   *   3. Last-used datasource stored in localStorage for this dashboard.
+   *   4. Grafana's configured default datasource.
+   *
+   * Resolves before the async loadDatasource so its result can be passed in.
+   */
+  private async resolveDatasourceRef(): Promise<DataSourceRef | undefined> {
+    const queryRunner = getQueryRunnerFor(this.state.panelRef.resolve());
+    if (!queryRunner) {
+      return undefined;
+    }
+
+    // Already have an explicit ref on the runner or the first query — loadDatasource handles it.
+    if (queryRunner.state.datasource ?? queryRunner.state.queries?.[0]?.datasource) {
+      return undefined;
+    }
+
+    // Try the last-used datasource for this dashboard from localStorage.
+    const dashboard = getDashboardSceneFor(this);
+    const dashboardUid = dashboard.state.uid ?? '';
+    const lastUsedDatasource = getLastUsedDatasourceFromStorage(dashboardUid);
+    if (lastUsedDatasource?.datasourceUid) {
+      const dsSettings = await getDataSourceInstanceSettings({ uid: lastUsedDatasource.datasourceUid });
+      if (dsSettings) {
+        return getDataSourceRef(dsSettings);
+      }
+    }
+
+    // Fall back to the Grafana-configured default datasource.
+    const defaultDsSettings = await getDataSourceInstanceSettings(config.defaultDatasource);
+    return defaultDsSettings ? getDataSourceRef(defaultDsSettings) : undefined;
+  }
+
+  private async loadDatasource(resolvedRef?: DataSourceRef) {
     const queryRunner = getQueryRunnerFor(this.state.panelRef.resolve());
     if (!queryRunner) {
       this.setState({ datasource: undefined, dsSettings: undefined, dsError: undefined });
@@ -100,58 +204,42 @@ export class PanelDataPaneNext extends SceneObjectBase<PanelDataPaneNextState> {
     }
 
     try {
-      let datasource: DataSourceApi | undefined;
-      let dsSettings: DataSourceInstanceSettings | undefined;
-
-      // Get datasource ref from queryRunner or infer from first query
-      let datasourceToLoad = queryRunner.state.datasource ?? queryRunner.state.queries?.[0]?.datasource;
-
-      // Fallback to last-used datasource from localStorage (parity with PanelDataQueriesTab)
+      // queryRunner.state.datasource takes precedence; resolvedRef is the fallback computed by
+      // resolveDatasourceRef() for panels that have no explicit datasource in their model.
+      // resolvedRef is intentionally not written back to queryRunner to avoid mutating the model
+      // and bleeding into the dashboard save path.
+      const datasourceToLoad =
+        queryRunner.state.datasource ?? queryRunner.state.queries?.[0]?.datasource ?? resolvedRef;
       if (!datasourceToLoad) {
-        const dashboard = getDashboardSceneFor(this);
-        const dashboardUid = dashboard.state.uid ?? '';
-        const lastUsedDatasource = getLastUsedDatasourceFromStorage(dashboardUid);
-
-        if (lastUsedDatasource?.datasourceUid) {
-          dsSettings = getDataSourceSrv().getInstanceSettings({ uid: lastUsedDatasource.datasourceUid });
-          if (dsSettings) {
-            datasource = await getDataSourceSrv().get({
-              uid: lastUsedDatasource.datasourceUid,
-              type: dsSettings.type,
-            });
-
-            queryRunner.setState({
-              datasource: {
-                ...getDataSourceRef(dsSettings),
-                uid: lastUsedDatasource.datasourceUid,
-              },
-            });
-          }
-        }
-      } else {
-        datasource = await getDataSourceSrv().get(datasourceToLoad);
-        dsSettings = getDataSourceSrv().getInstanceSettings(datasourceToLoad);
-      }
-
-      if (datasource && dsSettings) {
-        this.setState({ datasource, dsSettings, dsError: undefined });
-        storeLastUsedDataSourceInLocalStorage(getDataSourceRef(dsSettings) || { default: true });
-      } else {
         this.setState({ datasource: undefined, dsSettings: undefined, dsError: undefined });
+        return;
       }
+
+      const panelContext = this.getPanelContext();
+      const datasource = await getDataSourceInstance(datasourceToLoad, panelContext);
+      const dsSettings = await getDataSourceInstanceSettings(datasourceToLoad, panelContext);
+
+      // Treat a missing dsSettings as a load failure so the catch block can attempt the
+      // default fallback — same recovery path as a rejected get() call.
+      if (!datasource || !dsSettings) {
+        throw new Error(`Datasource settings not found for uid: ${JSON.stringify(datasourceToLoad)}`);
+      }
+
+      this.setState({ datasource, dsSettings, dsError: undefined });
+      storeLastUsedDataSourceInLocalStorage(getDataSourceRef(dsSettings) || { default: true });
     } catch (err) {
       console.error('Failed to load datasource:', err);
 
       // Fallback to default datasource (parity with PanelDataQueriesTab)
       try {
-        const datasource = await getDataSourceSrv().get(config.defaultDatasource);
-        const dsSettings = getDataSourceSrv().getInstanceSettings(config.defaultDatasource);
+        const datasource = await getDataSourceInstance(config.defaultDatasource);
+        const dsSettings = await getDataSourceInstanceSettings(config.defaultDatasource);
 
         if (datasource && dsSettings) {
           this.setState({ datasource, dsSettings, dsError: undefined });
-          queryRunner.setState({
-            datasource: getDataSourceRef(dsSettings),
-          });
+          // Intentionally not calling queryRunner.setState here — doing so would fire the
+          // datasource-change subscription and trigger a redundant second loadDatasource().
+          // resolveDatasourceRef() handles the stale-ref case on the next activation.
         }
       } catch (fallbackErr) {
         console.error('Failed to load default datasource:', fallbackErr);
@@ -161,6 +249,23 @@ export class PanelDataPaneNext extends SceneObjectBase<PanelDataPaneNextState> {
           dsError: err instanceof Error ? err : new Error('Failed to load datasource'),
         });
       }
+    }
+  }
+
+  /**
+   * When in Mixed mode, checks if all non-expression queries now use the same datasource.
+   * If so, switches back from Mixed to that single datasource so that
+   * datasource-specific query options (cache timeout, cache TTL, etc.) are surfaced.
+   */
+  private resolveUniformDatasource() {
+    const queryRunner = getQueryRunnerFor(this.state.panelRef.resolve());
+    if (!queryRunner || queryRunner.state.datasource?.uid !== MIXED_DATASOURCE_NAME) {
+      return;
+    }
+
+    const commonDs = getUniformDatasource(queryRunner.state.queries);
+    if (commonDs) {
+      queryRunner.setState({ datasource: commonDs });
     }
   }
 
@@ -189,6 +294,7 @@ export class PanelDataPaneNext extends SceneObjectBase<PanelDataPaneNextState> {
     const queryRunner = getQueryRunnerFor(this.state.panelRef.resolve());
     if (queryRunner) {
       queryRunner.setState({ queries });
+      this.resolveUniformDatasource();
     }
   };
 
@@ -214,7 +320,11 @@ export class PanelDataPaneNext extends SceneObjectBase<PanelDataPaneNextState> {
       ...query,
     };
 
-    newQuery.datasource = resolveNewQueryDatasource(newQuery.datasource ?? undefined, dsSettings);
+    newQuery.datasource = resolveNewQueryDatasource(
+      newQuery.datasource ?? undefined,
+      dsSettings,
+      this.state.defaultDatasourceRef
+    );
 
     const updatedQueries = addQuery(currentQueries, newQuery);
 
@@ -247,6 +357,7 @@ export class PanelDataPaneNext extends SceneObjectBase<PanelDataPaneNextState> {
       queries.splice(index, 1);
       return queries;
     });
+    this.resolveUniformDatasource();
     this.runQueries();
   };
 
@@ -275,6 +386,117 @@ export class PanelDataPaneNext extends SceneObjectBase<PanelDataPaneNextState> {
     if (queryRunner) {
       queryRunner.runQueries();
     }
+  };
+
+  public bulkDeleteQueries = (refIds: readonly string[]) => {
+    const queryRunner = getQueryRunnerFor(this.state.panelRef.resolve());
+    if (!queryRunner) {
+      return;
+    }
+    const refIdSet = new Set(refIds);
+    const queries = queryRunner.state.queries.filter(({ refId }) => !refIdSet.has(refId));
+    queryRunner.setState({ queries });
+    this.resolveUniformDatasource();
+    this.runQueries();
+  };
+
+  public bulkToggleQueriesHide = (refIds: readonly string[], hide: boolean) => {
+    const queryRunner = getQueryRunnerFor(this.state.panelRef.resolve());
+    if (!queryRunner) {
+      return;
+    }
+    const refIdSet = new Set(refIds);
+    const queries = queryRunner.state.queries.map((q) => (refIdSet.has(q.refId) ? { ...q, hide } : q));
+    queryRunner.setState({ queries });
+    this.runQueries();
+  };
+
+  /**
+   * Resolve the current datasource type for each query, keyed by refId. Used to decide whether a
+   * datasource change crosses plugin types (and therefore needs a fresh default query). Queries
+   * with no datasource — or whose datasource can't be resolved — map to `undefined`, which callers
+   * treat as a type change.
+   */
+  private async resolvePreviousDatasourceTypes(
+    queries: DataQuery[],
+    scopedVars: ScopedVars
+  ): Promise<Map<string, string | undefined>> {
+    const entries = await Promise.all(
+      queries.map(async (query) => {
+        const settings = query.datasource
+          ? await getDataSourceInstanceSettings(query.datasource, scopedVars)
+          : undefined;
+        return [query.refId, settings?.type] as const;
+      })
+    );
+    return new Map(entries);
+  }
+
+  public bulkChangeDataSource = async (refIds: readonly string[], dsRef: DataSourceRef) => {
+    const queryRunner = getQueryRunnerFor(this.state.panelRef.resolve());
+    if (!queryRunner) {
+      return;
+    }
+
+    const panelContext = this.getPanelContext();
+    const newDataSource = await getDataSourceInstanceSettings(dsRef, panelContext);
+    if (!newDataSource) {
+      this.setState({ dsError: new Error(`Datasource not found: ${dsRef.uid ?? dsRef.type}`) });
+      return;
+    }
+
+    let defaultQuery: Partial<DataQuery> | undefined;
+    try {
+      const ds = await getDataSourceInstance(dsRef, panelContext);
+      defaultQuery = ds.getDefaultQuery?.(CoreApp.PanelEditor);
+    } catch {
+      this.setState({ dsError: new Error(`Failed to load datasource: ${newDataSource.name ?? newDataSource.uid}`) });
+      return;
+    }
+
+    const refIdSet = new Set(refIds);
+
+    // Pre-resolve the previous datasource type for each selected query. The async settings API
+    // can't be called from the synchronous remapQuery map callback below, so resolve up front.
+    const previousTypeByRefId = await this.resolvePreviousDatasourceTypes(
+      queryRunner.state.queries.filter((query) => refIdSet.has(query.refId)),
+      panelContext
+    );
+
+    const requiresMixedMode = queryRunner.state.datasource?.uid !== MIXED_DATASOURCE_NAME;
+
+    const remapQuery = (query: DataQuery, fallbackDsRef?: DataSourceRef): DataQuery => {
+      if (refIdSet.has(query.refId)) {
+        const previousType = previousTypeByRefId.get(query.refId);
+        const shouldUseDefaultQuery = previousType !== newDataSource.type;
+        if (shouldUseDefaultQuery && defaultQuery) {
+          return { ...defaultQuery, ...query, datasource: dsRef };
+        }
+        return { ...query, datasource: dsRef };
+      }
+      if (fallbackDsRef && !query.datasource) {
+        return { ...query, datasource: fallbackDsRef };
+      }
+      return query;
+    };
+
+    if (requiresMixedMode) {
+      const currentPanelDsRef = queryRunner.state.datasource;
+      const defaultDsSettings = await getDataSourceInstanceSettings(config.defaultDatasource);
+      const fallbackDsRef = currentPanelDsRef ?? (defaultDsSettings ? getDataSourceRef(defaultDsSettings) : undefined);
+
+      queryRunner.setState({
+        queries: queryRunner.state.queries.map((query) => remapQuery(query, fallbackDsRef)),
+        datasource: { type: 'mixed', uid: MIXED_DATASOURCE_NAME },
+      });
+    } else {
+      queryRunner.setState({
+        queries: queryRunner.state.queries.map((query) => remapQuery(query)),
+      });
+    }
+
+    this.resolveUniformDatasource();
+    queryRunner.runQueries();
   };
 
   // Transformation Operations
@@ -309,6 +531,12 @@ export class PanelDataPaneNext extends SceneObjectBase<PanelDataPaneNextState> {
       return;
     }
 
+    reportInteraction('grafana_panel_transformations_clicked', {
+      context: 'query_editor_next',
+      type: transformationId,
+      action: 'add',
+    });
+
     const transformations = filterDataTransformerConfigs([...transformer.state.transformations]);
     const newConfig: DataTransformerConfig = { id: transformationId, options: {} };
     const insertAt = afterIndex !== undefined ? afterIndex + 1 : transformations.length;
@@ -332,6 +560,16 @@ export class PanelDataPaneNext extends SceneObjectBase<PanelDataPaneNextState> {
       return;
     }
 
+    const removed = transformations[index];
+    if (removed?.id) {
+      reportInteraction('grafana_panel_transformations_clicked', {
+        context: 'query_editor_next',
+        type: removed.id,
+        action: 'delete',
+        total_transformations: transformations.length - 1,
+      });
+    }
+
     transformations.splice(index, 1);
     transformer.setState({ transformations });
     this.runQueries();
@@ -345,6 +583,32 @@ export class PanelDataPaneNext extends SceneObjectBase<PanelDataPaneNextState> {
 
     const transformation = transformations[index];
     transformations[index] = { ...transformation, disabled: !transformation.disabled };
+    transformer.setState({ transformations });
+    this.runQueries();
+  };
+
+  public bulkDeleteTransformations = (indices: number[]) => {
+    const transformer = this.getSceneDataTransformer();
+    if (!transformer) {
+      return;
+    }
+    const indexSet = new Set(indices);
+    const transformations = filterDataTransformerConfigs(transformer.state.transformations).filter(
+      (_, i) => !indexSet.has(i)
+    );
+    transformer.setState({ transformations });
+    this.runQueries();
+  };
+
+  public bulkToggleTransformationsDisabled = (indices: number[], disabled: boolean) => {
+    const transformer = this.getSceneDataTransformer();
+    if (!transformer) {
+      return;
+    }
+    const indexSet = new Set(indices);
+    const transformations = filterDataTransformerConfigs(transformer.state.transformations).map((t, i) =>
+      indexSet.has(i) ? { ...t, disabled } : t
+    );
     transformer.setState({ transformations });
     this.runQueries();
   };
@@ -373,9 +637,13 @@ export class PanelDataPaneNext extends SceneObjectBase<PanelDataPaneNextState> {
       return;
     }
 
-    const newDataSource = getDataSourceSrv().getInstanceSettings(dsRef);
+    const panelContext = this.getPanelContext();
+    const newDataSource = await getDataSourceInstanceSettings(dsRef, panelContext);
     if (!newDataSource) {
-      throw new Error(`Failed to get datasource ${dsRef.uid ?? dsRef.type}`);
+      // Surface the failure in the editor rather than throwing — the caller (sidebar DS picker)
+      // does not wrap changeDataSource in a try/catch, so a thrown error would be silently swallowed.
+      this.setState({ dsError: new Error(`Datasource not found: ${dsRef.uid ?? dsRef.type}`) });
+      return;
     }
 
     const queries = [...queryRunner.state.queries];
@@ -386,7 +654,7 @@ export class PanelDataPaneNext extends SceneObjectBase<PanelDataPaneNextState> {
 
     const targetQuery = queries[targetIndex];
     const previousDataSource = targetQuery.datasource
-      ? getDataSourceSrv().getInstanceSettings(targetQuery.datasource)
+      ? await getDataSourceInstanceSettings(targetQuery.datasource, panelContext)
       : undefined;
 
     const shouldUseDefaultQuery = !previousDataSource || previousDataSource.type !== newDataSource.type;
@@ -394,10 +662,11 @@ export class PanelDataPaneNext extends SceneObjectBase<PanelDataPaneNextState> {
     let updatedQuery: DataQuery;
     if (shouldUseDefaultQuery) {
       try {
-        const ds = await getDataSourceSrv().get(dsRef);
+        const ds = await getDataSourceInstance(dsRef, panelContext);
         updatedQuery = { ...ds.getDefaultQuery?.(CoreApp.PanelEditor), ...targetQuery, datasource: dsRef };
       } catch {
-        throw new Error(`Failed to get datasource ${newDataSource.name ?? newDataSource.uid}`);
+        this.setState({ dsError: new Error(`Failed to load datasource: ${newDataSource.name ?? newDataSource.uid}`) });
+        return;
       }
     } else {
       updatedQuery = { ...targetQuery, datasource: dsRef };
@@ -415,8 +684,8 @@ export class PanelDataPaneNext extends SceneObjectBase<PanelDataPaneNextState> {
       // We must "freeze" their current inherited datasource into an explicit datasource property.
       // Matches legacy behavior in PanelDataQueriesTab.tsx:onSelectQueryFromLibrary (lines 391-410)
       const currentPanelDsRef = queryRunner.state.datasource;
-      const fallbackDsRef =
-        currentPanelDsRef || getDataSourceRef(getDataSourceSrv().getInstanceSettings(config.defaultDatasource)!);
+      const defaultDsSettings = await getDataSourceInstanceSettings(config.defaultDatasource);
+      const fallbackDsRef = currentPanelDsRef ?? (defaultDsSettings ? getDataSourceRef(defaultDsSettings) : undefined);
 
       const queriesWithExplicitDs = queries.map((query) => {
         if (query.datasource) {
@@ -430,9 +699,14 @@ export class PanelDataPaneNext extends SceneObjectBase<PanelDataPaneNextState> {
         datasource: { type: 'mixed', uid: MIXED_DATASOURCE_NAME },
       });
     } else {
+      // Panel is already Mixed — only update the target query's ref. The panel-level datasource
+      // hasn't changed, so the subscription in onActivate does NOT fire and loadDatasource is
+      // deliberately not called. The per-query datasource resolves independently via
+      // useSelectedQueryDatasource on the next render.
       queryRunner.setState({ queries });
     }
 
+    this.resolveUniformDatasource();
     queryRunner.runQueries();
   };
 
@@ -459,10 +733,12 @@ export class PanelDataPaneNext extends SceneObjectBase<PanelDataPaneNextState> {
     const timeFrom = options.timeRange?.from ?? undefined;
     const timeShift = options.timeRange?.shift ?? undefined;
     const hideTimeOverride = options.timeRange?.hide;
+    const compareWith =
+      panel.state.$timeRange instanceof PanelTimeRange ? panel.state.$timeRange.state.compareWith : undefined;
 
-    if (timeFrom || timeShift) {
-      panelStateUpdate.$timeRange = new PanelTimeRange({ timeFrom, timeShift, hideTimeOverride });
-      panelStateUpdate.hoverHeader = getUpdatedHoverHeader(panel.state.title, panelStateUpdate.$timeRange);
+    if (timeFrom !== undefined || timeShift !== undefined || compareWith) {
+      panelStateUpdate.$timeRange = new PanelTimeRange({ timeFrom, timeShift, hideTimeOverride, compareWith });
+      panelStateUpdate.hoverHeader = getUpdatedHoverHeader(panel.state.title, panelStateUpdate.$timeRange?.state);
     } else {
       panelStateUpdate.$timeRange = undefined;
       panelStateUpdate.hoverHeader = getUpdatedHoverHeader(panel.state.title, undefined);
@@ -497,6 +773,8 @@ export class PanelDataPaneNext extends SceneObjectBase<PanelDataPaneNextState> {
     if (index === -1) {
       return;
     }
+
+    reportTransformationEditInteraction('query_editor_next', newConfig.id);
 
     transformations[index] = newConfig;
     dataTransformer.setState({ transformations });

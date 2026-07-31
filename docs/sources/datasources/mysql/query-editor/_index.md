@@ -12,77 +12,14 @@ labels:
 menuTitle: Query editor
 title: MySQL query editor
 weight: 30
-refs:
-  variables:
-    - pattern: /docs/grafana/
-      destination: /docs/grafana/<GRAFANA_VERSION>/dashboards/variables/
-    - pattern: /docs/grafana-cloud/
-      destination: /docs/grafana-cloud/visualizations/dashboards/variables/
-  variable-syntax-advanced-variable-format-options:
-    - pattern: /docs/grafana/
-      destination: /docs/grafana/<GRAFANA_VERSION>/dashboards/variables/variable-syntax/#advanced-variable-format-options
-    - pattern: /docs/grafana-cloud/
-      destination: /docs/grafana-cloud/visualizations/dashboards/variables/variable-syntax/#advanced-variable-format-options
-  annotate-visualizations:
-    - pattern: /docs/grafana/
-      destination: /docs/grafana/<GRAFANA_VERSION>/dashboards/build-dashboards/annotate-visualizations/
-    - pattern: /docs/grafana-cloud/
-      destination: /docs/grafana-cloud/visualizations/dashboards/build-dashboards/annotate-visualizations/
-  explore:
-    - pattern: /docs/grafana/
-      destination: /docs/grafana/<GRAFANA_VERSION>/explore/
-    - pattern: /docs/grafana-cloud/
-      destination: /docs/grafana/<GRAFANA_VERSION>/explore/
-  query-transform-data:
-    - pattern: /docs/grafana/
-      destination: /docs/grafana/<GRAFANA_VERSION>/panels-visualizations/query-transform-data/
-    - pattern: /docs/grafana-cloud/
-      destination: /docs/grafana-cloud/visualizations/panels-visualizations/query-transform-data/
-  panel-inspector:
-    - pattern: /docs/grafana/
-      destination: /docs/grafana/<GRAFANA_VERSION>/panels-visualizations/panel-inspector/
-    - pattern: /docs/grafana-cloud/
-      destination: /docs/grafana-cloud/visualizations/panels-visualizations/panel-inspector/
-  query-editor:
-    - pattern: /docs/grafana/
-      destination: /docs/grafana/<GRAFANA_VERSION>/panels-visualizations/query-transform-data/#query-editors
-    - pattern: /docs/grafana-cloud/
-      destination: /docs/grafana-cloud/visualizations/panels-visualizations/query-transform-data/#query-editors
-  alert-rules:
-    - pattern: /docs/grafana/
-      destination: /docs/grafana/<GRAFANA_VERSION>/alerting/fundamentals/alert-rules/
-    - pattern: /docs/grafana-cloud/
-      destination: /docs/grafana-cloud/alerting-and-irm/alerting/alerting-rules/
-  template-annotations-and-labels:
-    - pattern: /docs/grafana/
-      destination: /docs/grafana/<GRAFANA_VERSION>/alerting/alerting-rules/templates/
-    - pattern: /docs/grafana-cloud/
-      destination: /docs/grafana-cloud/alerting-and-irm/alerting/alerting-rules/templates/
-  configure-standard-options:
-    - pattern: /docs/grafana/
-    - destination: /docs/grafana/<GRAFANA_VERSION>/panels-visualizations/configure-standard-options/
-  mysql-template-variables:
-    - pattern: /docs/grafana/
-      destination: /docs/grafana/<GRAFANA_VERSION>/datasources/mysql/template-variables/
-    - pattern: /docs/grafana-cloud/
-      destination: /docs/grafana/<GRAFANA_VERSION>/datasources/mysql/template-variables/
-  mysql-alerting:
-    - pattern: /docs/grafana/
-      destination: /docs/grafana/<GRAFANA_VERSION>/datasources/mysql/alerting/
-    - pattern: /docs/grafana-cloud/
-      destination: /docs/grafana/<GRAFANA_VERSION>/datasources/mysql/alerting/
-  mysql-annotations:
-    - pattern: /docs/grafana/
-      destination: /docs/grafana/<GRAFANA_VERSION>/datasources/mysql/annotations/
-    - pattern: /docs/grafana-cloud/
-      destination: /docs/grafana/<GRAFANA_VERSION>/datasources/mysql/annotations/
+review_date: 2026-05-11
 ---
 
 # MySQL query editor
 
-Grafana’s query editors are unique for each data source. For general information on Grafana query editors, refer to [Query editors](ref:query-editor). For general information on querying data sources in Grafana, refer to [Query and transform data](ref:query-transform-data).
+Grafana’s query editors are unique for each data source. For general information on Grafana query editors, refer to [Query editors](https://grafana.com/docs/grafana/<GRAFANA_VERSION>/panels-visualizations/query-transform-data/#query-editors). For general information on querying data sources in Grafana, refer to [Query and transform data](https://grafana.com/docs/grafana/<GRAFANA_VERSION>/panels-visualizations/query-transform-data/).
 
-The MySQL query editor is located on the [Explore page](ref:explore). You can also access the MySQL query editor from a dashboard panel. Click the ellipsis in the upper right of the panel and select **Edit**.
+The MySQL query editor is located on the [Explore page](https://grafana.com/docs/grafana/<GRAFANA_VERSION>/explore/). You can also access the MySQL query editor from a dashboard panel. Click the ellipsis in the upper right of the panel and select **Edit**.
 
 {{< admonition type="note" >}}
 If a default database is configured in the **Data Source Configuration page**, or via a provisioning configuration file, users will be restricted to querying only that pre-configured database.
@@ -99,8 +36,6 @@ If your table or database name contains a reserved word or a [prohibited charact
 {{< /admonition >}}
 
 ## MySQL Builder mode
-
-{{< figure alt="Builder mode" src="/media/docs/mysql/screenshot-mysql-query-editor.v11.3.png" class="docs-image--no-shadow" >}}
 
 The following components will help you build a MySQL query:
 
@@ -130,8 +65,6 @@ The following components will help you build a MySQL query:
 ## MySQL Code mode
 
 To create advanced queries, switch to **Code mode** by clicking **Code** in the upper right of the editor window. Code mode supports the auto-completion of tables, columns, SQL keywords, standard SQL functions, Grafana template variables, and Grafana macros. Columns cannot be completed before a table has been specified.
-
-{{< figure src="/static/img/docs/v92/sql_code_editor.png" class="docs-image--no-shadow" >}}
 
 Select **Table** or **Time Series** as the format. Click the **{}** in the bottom right to format the query. Click the **downward caret** to expand the Code mode editor. **CTRL/CMD + Return** serves as a keyboard shortcut to execute the query.
 
@@ -164,6 +97,10 @@ You can add macros to your queries to simplify the syntax and enable dynamic ele
 | `$__unixEpochGroup(dateColumn,'5m', [fillmode])`      | Same as $\_\_timeGroup but for times stored as Unix timestamp. **Note that `fillMode` only works with time series queries.**                                                                                                                   |
 | `$__unixEpochGroupAlias(dateColumn,'5m', [fillmode])` | Same as $\_\_timeGroup but also adds a column alias. **Note that `fillMode` only works with time series queries.**                                                                                                                             |
 
+{{< admonition type="note" >}}
+As of Grafana 13.0, fill resampling in `$__timeGroup` and `$__unixEpochGroup` includes additional safeguards to prevent incorrect data points when the query returns no rows or the time range falls outside the data boundaries.
+{{< /admonition >}}
+
 ## Table SQL queries
 
 If the **Format** option is set to **Table**, you can execute virtually any type of SQL query. The Table panel will automatically display the resulting columns and rows from your query.
@@ -179,10 +116,6 @@ SELECT
 INNER JOIN user on user.id = dashboard.created_by
 WHERE $__timeFilter(dashboard.created)
 ```
-
-Table panel results:
-
-![](/static/img/docs/v43/mysql_table.png)
 
 ## Time series queries
 
@@ -259,7 +192,7 @@ Table panel result:
 
 {{< figure alt="output of time group macro" src="/media/docs/grafana/data-sources/mysql/screenshot-timegroup-macro.png" >}}
 
-Given the result in the following example, the data is grouped and aggregated within buckets with timestamps of fixed interval i.e. 5 mins. To customize the default series name formatting (optional), refer to [Standard options definitions](ref:configure-standard-options).
+Given the result in the following example, the data is grouped and aggregated within buckets with timestamps of fixed interval i.e. 5 mins. To customize the default series name formatting (optional), refer to [Standard options definitions](https://grafana.com/docs/grafana/<GRAFANA_VERSION>/panels-visualizations/configure-standard-options/).
 
 **Example with `$__timeGroupAlias(dateColumn,'5m')` Macro:**
 
@@ -279,7 +212,7 @@ Table panel result:
 {{< figure alt="output of time group alias macro" src="/media/docs/grafana/data-sources/mysql/screenshot-timeGroupAlias-macro.png" >}}
 
 The following result is similar to the result of the `$__timeGroup(dateColumn,'5m')` macro, except it uses a built-in alias for the time column.
-To customize the default series name formatting (optional), refer to [Standard options definitions](ref:configure-standard-options).
+To customize the default series name formatting (optional), refer to [Standard options definitions](https://grafana.com/docs/grafana/<GRAFANA_VERSION>/panels-visualizations/configure-standard-options/).
 
 **Example with `$__timeGroupAlias` Macro to convert null values to zero instead:**
 
@@ -299,7 +232,7 @@ Table panel result:
 
 {{< figure alt="output of null values to zero case, for time group alias macro" src="/media/docs/grafana/data-sources/mysql/screenshot-timeGroupAlias-macro-conv-null-to-zero.png" >}}
 
-Given the result in the following example, null values within bucket timestamps are replaced by zero and also add the `Time` column alias by default. To customize the default series name formatting (optional), refer to [Standard options definitions](ref:configure-standard-options) to display the value of `${__field.labels.hostname}`.
+Given the result in the following example, null values within bucket timestamps are replaced by zero and also add the `Time` column alias by default. To customize the default series name formatting (optional), refer to [Standard options definitions](https://grafana.com/docs/grafana/<GRAFANA_VERSION>/panels-visualizations/configure-standard-options/) to display the value of `${__field.labels.hostname}`.
 
 **Example with multiple columns for `$__timeGroupAlias(dateColumn,'5m')` Macro:**
 
@@ -324,16 +257,16 @@ The query returns multiple columns representing minimum and maximum values withi
 
 Instead of hard-coding values like server, application, or sensor names in your metric queries, you can use variables. Variables appear as drop-down select boxes at the top of the dashboard, making it easy to change the data displayed in your dashboard.
 
-For detailed information on using template variables with MySQL, refer to [MySQL template variables](ref:mysql-template-variables).
+For detailed information on using template variables with MySQL, refer to [MySQL template variables](https://grafana.com/docs/grafana/<GRAFANA_VERSION>/datasources/mysql/template-variables/).
 
 ## Annotations
 
 Annotations allow you to overlay event information on your graphs, helping you correlate events with metrics. You can write SQL queries that return event data to display as annotations on your dashboards.
 
-For detailed information on creating annotations with MySQL, refer to [MySQL annotations](ref:mysql-annotations).
+For detailed information on creating annotations with MySQL, refer to [MySQL annotations](https://grafana.com/docs/grafana/<GRAFANA_VERSION>/datasources/mysql/annotations/).
 
 ## Alerting
 
 You can use time series queries to create Grafana-managed alert rules. Table formatted queries are not supported in alert rule conditions.
 
-For detailed information on creating alerts with MySQL, refer to [MySQL alerting](ref:mysql-alerting).
+For detailed information on creating alerts with MySQL, refer to [MySQL alerting](https://grafana.com/docs/grafana/<GRAFANA_VERSION>/datasources/mysql/alerting/).

@@ -1,8 +1,10 @@
 /**
  * LIST_VARIABLES command
  *
- * List all template variables in the current dashboard in v2beta1 VariableKind format.
+ * List template variables for a scope (dashboard or row/tab section) in v2beta1 VariableKind format.
  */
+
+import { type z } from 'zod';
 
 import { SceneVariableSet } from '@grafana/scenes';
 
@@ -10,23 +12,32 @@ import { sceneVariablesSetToSchemaV2Variables } from '../../serialization/sceneV
 
 import { payloads } from './schemas';
 import { readOnly, type MutationCommand } from './types';
+import { resolveVariableScope } from './variableScope';
 
-export const listVariablesCommand: MutationCommand<Record<string, never>> = {
+const listVariablesPayloadSchema = payloads.listVariables;
+
+type ListVariablesPayload = z.infer<typeof listVariablesPayloadSchema>;
+
+export const listVariablesCommand: MutationCommand<ListVariablesPayload> = {
   name: 'LIST_VARIABLES',
   description: payloads.listVariables.description ?? '',
 
   payloadSchema: payloads.listVariables,
   permission: readOnly,
+  readOnly: true,
 
-  handler: async (_payload, context) => {
+  handler: async (payload, context) => {
     const { scene } = context;
 
     try {
-      const varSet = scene.state.$variables;
+      const effectiveParentPath = payload.parentPath ?? '/';
+      const { scopeOwner } = resolveVariableScope(scene, effectiveParentPath);
+
+      const varSet = scopeOwner.state.$variables;
       if (!varSet || !(varSet instanceof SceneVariableSet)) {
         return {
           success: true,
-          data: { variables: [] },
+          data: { variables: [], scopePath: effectiveParentPath },
           changes: [],
         };
       }
@@ -35,7 +46,7 @@ export const listVariablesCommand: MutationCommand<Record<string, never>> = {
 
       return {
         success: true,
-        data: { variables },
+        data: { variables, scopePath: effectiveParentPath },
         changes: [],
       };
     } catch (error) {

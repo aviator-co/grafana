@@ -2,18 +2,31 @@ import { kebabCase } from 'lodash';
 import { useCallback, useEffect, useMemo } from 'react';
 import { Controller, useFormContext } from 'react-hook-form';
 
-import { SelectableValue } from '@grafana/data';
+import { type SelectableValue } from '@grafana/data';
 import { Trans, t } from '@grafana/i18n';
-import { Alert, Box, Divider, Field, FileUpload, Input, RadioButtonList, Select, Stack, Text } from '@grafana/ui';
+import {
+  Alert,
+  Box,
+  Divider,
+  Field,
+  FileDropzone,
+  FileUpload,
+  IconButton,
+  Input,
+  RadioButtonList,
+  Select,
+  Stack,
+  Text,
+} from '@grafana/ui';
 
 import { getAlertManagerDataSources } from '../../../utils/datasource';
-import { ExtraConfigWarning } from '../ExtraConfigWarning';
-import { ImportFormValues } from '../ImportToGMA';
+import { type ImportFormValues } from '../ImportToGMA';
+import { PolicyTreeNameHelp } from '../PolicyTreeNameHelp';
 import { ValidationStatus } from '../ValidationStatus';
-import { getNotificationsSourceOptions } from '../Wizard/constants';
-import { DryRunValidationResult } from '../types';
+import { getNotificationsSourceOptions } from '../Wizard/steps';
+import { type DryRunValidationResult } from '../types';
 
-import { hasValidSourceSelection, isStep1Valid, validatePolicyTreeName } from './utils';
+import { findDuplicateTemplateFileName, hasValidSourceSelection, isStep1Valid, validatePolicyTreeName } from './utils';
 
 interface Step1ContentProps {
   /** Whether the user has permission to import notifications */
@@ -24,8 +37,8 @@ interface Step1ContentProps {
   dryRunResult?: DryRunValidationResult;
   /** Callback to trigger dry-run validation */
   onTriggerDryRun: () => void;
-  /** Identifier of an existing imported config that will be replaced, if any */
-  existingIdentifier?: string;
+  /** Callback to clear a stale dry-run result when the step is no longer runnable */
+  onResetDryRun: () => void;
 }
 
 /**
@@ -38,7 +51,7 @@ export function Step1Content({
   dryRunState,
   dryRunResult,
   onTriggerDryRun,
-  existingIdentifier,
+  onResetDryRun,
 }: Step1ContentProps) {
   const {
     control,
@@ -49,25 +62,47 @@ export function Step1Content({
     formState: { errors },
   } = useFormContext<ImportFormValues>();
 
-  const [notificationsSource, policyTreeName, notificationsDatasourceUID, notificationsYamlFile] = watch([
+  const [
+    notificationsSource,
+    policyTreeName,
+    notificationsDatasourceUID,
+    notificationsYamlFile,
+    notificationsTemplateFiles,
+  ] = watch([
     'notificationsSource',
     'policyTreeName',
     'notificationsDatasourceUID',
     'notificationsYamlFile',
+    'notificationsTemplateFiles',
   ]);
+
+  const duplicateTemplateFileName = findDuplicateTemplateFileName(notificationsTemplateFiles);
 
   // Whether we have enough data to run a dry-run validation
   const canRunDryRun =
-    !!policyTreeName &&
+    Boolean(policyTreeName) &&
     validatePolicyTreeName(policyTreeName) === true &&
+    !duplicateTemplateFileName &&
     hasValidSourceSelection(notificationsSource, notificationsYamlFile, notificationsDatasourceUID);
 
-  // Trigger dry-run when a source is selected (YAML file or datasource)
+  // Trigger dry-run when a source is selected (YAML file or datasource) or the template files change.
+  // When the step is no longer runnable (e.g. a duplicate template name), clear any previous result so
+  // a stale success can't keep the review step reporting the config as ready to import.
   useEffect(() => {
     if (canRunDryRun) {
       onTriggerDryRun();
+    } else {
+      onResetDryRun();
     }
-  }, [canRunDryRun, onTriggerDryRun, notificationsSource, notificationsYamlFile, notificationsDatasourceUID]);
+  }, [
+    canRunDryRun,
+    onTriggerDryRun,
+    onResetDryRun,
+    notificationsSource,
+    notificationsYamlFile,
+    notificationsDatasourceUID,
+    notificationsTemplateFiles,
+  ]);
 
   // Trigger validation + dry-run when the policy tree name input loses focus
   const handlePolicyTreeNameBlur = useCallback(async () => {
@@ -94,9 +129,6 @@ export function Step1Content({
         </Alert>
       )}
 
-      {/* Extra config overwrite warning */}
-      {existingIdentifier && <ExtraConfigWarning existingIdentifier={existingIdentifier} />}
-
       {/* Import Source Card */}
       <Box backgroundColor="secondary" borderRadius="default" borderColor="weak" borderStyle="solid">
         <Box display="flex" alignItems="center" justifyContent="space-between" padding={2}>
@@ -111,7 +143,11 @@ export function Step1Content({
               render={({ field: { onChange, ref, ...field } }) => (
                 <RadioButtonList
                   {...field}
-                  onChange={(value) => setValue('notificationsSource', value)}
+                  onChange={(value) => {
+                    setValue('notificationsSource', value);
+                    // Template uploads only apply to the YAML source; clear them when switching source
+                    setValue('notificationsTemplateFiles', []);
+                  }}
                   options={sourceOptions}
                 />
               )}
@@ -122,33 +158,97 @@ export function Step1Content({
 
           <Box marginTop={2}>
             {notificationsSource === 'yaml' && (
-              <Field
-                label={t('alerting.import-to-gma.step1.yaml-file', 'Alertmanager config YAML')}
-                invalid={!!errors.notificationsYamlFile}
-                error={errors.notificationsYamlFile?.message}
-                noMargin
-              >
-                <Controller
-                  render={({ field: { ref, onChange, value, ...field } }) => (
-                    <FileUpload
-                      {...field}
-                      accept=".yaml,.yml"
-                      onFileUpload={(event) => {
-                        const file = event.currentTarget.files?.[0];
-                        if (file) {
-                          onChange(file);
-                        }
-                      }}
-                    >
-                      {notificationsYamlFile
-                        ? notificationsYamlFile.name
-                        : t('alerting.import-to-gma.step1.upload', 'Upload YAML file')}
-                    </FileUpload>
+              <Stack direction="column" gap={2}>
+                <Field
+                  label={t('alerting.import-to-gma.step1.yaml-file', 'Alertmanager config YAML')}
+                  invalid={Boolean(errors.notificationsYamlFile)}
+                  error={errors.notificationsYamlFile?.message}
+                  noMargin
+                >
+                  <Controller
+                    render={({ field: { ref, onChange, value, ...field } }) => (
+                      <FileUpload
+                        {...field}
+                        accept=".yaml,.yml"
+                        onFileUpload={(event) => {
+                          const file = event.currentTarget.files?.[0];
+                          if (file) {
+                            onChange(file);
+                          }
+                        }}
+                      >
+                        {notificationsYamlFile
+                          ? notificationsYamlFile.name
+                          : t('alerting.import-to-gma.step1.upload', 'Upload YAML file')}
+                      </FileUpload>
+                    )}
+                    control={control}
+                    name="notificationsYamlFile"
+                  />
+                </Field>
+
+                <Field
+                  label={t('alerting.import-to-gma.step1.templates-label', 'Notification templates')}
+                  description={t(
+                    'alerting.import-to-gma.step1.templates-desc',
+                    'Optional. Upload the template files referenced by your Alertmanager config. Each file is imported as a template named after the file.'
                   )}
-                  control={control}
-                  name="notificationsYamlFile"
-                />
-              </Field>
+                  invalid={Boolean(duplicateTemplateFileName)}
+                  error={
+                    duplicateTemplateFileName
+                      ? t(
+                          'alerting.import-to-gma.step1.templates-duplicate',
+                          'Duplicate template file name: "{{name}}". Template file names must be unique.',
+                          { name: duplicateTemplateFileName }
+                        )
+                      : undefined
+                  }
+                  noMargin
+                >
+                  <Controller
+                    render={({ field: { value, onChange } }) => (
+                      <Stack direction="column" gap={1}>
+                        <FileDropzone
+                          // Template files can have any name/extension (mimirtool loads arbitrary *.tpl);
+                          // the file name becomes the template key, so we don't restrict by extension.
+                          options={{
+                            multiple: true,
+                            onDrop: (acceptedFiles) => onChange([...value, ...acceptedFiles]),
+                          }}
+                          fileListRenderer={() => null}
+                        >
+                          <Text color="secondary">
+                            {t(
+                              'alerting.import-to-gma.step1.templates-dropzone',
+                              'Drop template files here or click to upload'
+                            )}
+                          </Text>
+                        </FileDropzone>
+
+                        {value.map((file, index) => (
+                          <Stack
+                            key={`${file.name}-${index}`}
+                            direction="row"
+                            alignItems="center"
+                            justifyContent="space-between"
+                          >
+                            <Text>{file.name}</Text>
+                            <IconButton
+                              name="trash-alt"
+                              tooltip={t('alerting.import-to-gma.step1.templates-remove', 'Remove {{name}}', {
+                                name: file.name,
+                              })}
+                              onClick={() => onChange(value.filter((_, fileIndex) => fileIndex !== index))}
+                            />
+                          </Stack>
+                        ))}
+                      </Stack>
+                    )}
+                    control={control}
+                    name="notificationsTemplateFiles"
+                  />
+                </Field>
+              </Stack>
             )}
 
             {notificationsSource === 'datasource' && <AlertmanagerDataSourceSelect />}
@@ -165,12 +265,14 @@ export function Step1Content({
         </Box>
         <Divider spacing={0} />
         <Box padding={2}>
-          <Text color="secondary" variant="bodySmall">
-            <Trans i18nKey="alerting.import-to-gma.step1.policy-tree-desc">
-              Name for the imported notification policy tree. Alerts with the label{' '}
-              <code>__grafana_managed_route__</code> matching this name will be routed through this policy tree.
-            </Trans>
-          </Text>
+          <Stack direction="row" alignItems="center" gap={1} wrap="wrap">
+            <Text color="secondary" variant="bodySmall">
+              <Trans i18nKey="alerting.import-to-gma.step1.policy-tree-desc">
+                When you import, Grafana creates a separate notification policy tree. Enter a name you will recognize.
+              </Trans>
+            </Text>
+            <PolicyTreeNameHelp />
+          </Stack>
           <Box marginTop={2}>
             <Field
               label={t('alerting.import-to-gma.step1.policy-tree-name', 'Policy tree name')}
@@ -209,18 +311,25 @@ export function useStep1Validation(canImport: boolean): boolean {
     watch,
     formState: { errors },
   } = useFormContext<ImportFormValues>();
-  const [notificationsSource, policyTreeName, notificationsDatasourceUID, notificationsYamlFile] = watch([
+  const [
+    notificationsSource,
+    policyTreeName,
+    notificationsDatasourceUID,
+    notificationsYamlFile,
+    notificationsTemplateFiles,
+  ] = watch([
     'notificationsSource',
     'policyTreeName',
     'notificationsDatasourceUID',
     'notificationsYamlFile',
+    'notificationsTemplateFiles',
   ]);
 
   const hasStep1Errors =
-    !!errors.notificationsSource ||
-    !!errors.policyTreeName ||
-    !!errors.notificationsDatasourceUID ||
-    !!errors.notificationsYamlFile;
+    Boolean(errors.notificationsSource) ||
+    Boolean(errors.policyTreeName) ||
+    Boolean(errors.notificationsDatasourceUID) ||
+    Boolean(errors.notificationsYamlFile);
 
   if (!canImport || hasStep1Errors) {
     return false;
@@ -231,6 +340,7 @@ export function useStep1Validation(canImport: boolean): boolean {
     notificationsSource,
     notificationsYamlFile,
     notificationsDatasourceUID,
+    notificationsTemplateFiles,
   });
 }
 

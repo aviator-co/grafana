@@ -1,45 +1,48 @@
-import * as H from 'history';
+import deepEqual from 'fast-deep-equal';
+import type * as H from 'history';
 import { debounce } from 'lodash';
 
-import { NavIndex, PanelPlugin } from '@grafana/data';
+import { type NavIndex, type PanelPlugin } from '@grafana/data';
 import { t } from '@grafana/i18n';
-import { config, locationService } from '@grafana/runtime';
+import { config, locationService, reportInteraction } from '@grafana/runtime';
+import { FlagKeys, getFeatureFlagClient } from '@grafana/runtime/internal';
 import {
   NewSceneObjectAddedEvent,
   PanelBuilders,
-  SceneComponentProps,
+  type SceneComponentProps,
   SceneDataTransformer,
   SceneObjectBase,
-  SceneObjectRef,
-  SceneObjectState,
+  type SceneObjectRef,
+  type SceneObjectState,
   SceneObjectStateChangedEvent,
   SceneQueryRunner,
   sceneUtils,
-  VizPanel,
+  type VizPanel,
 } from '@grafana/scenes';
-import { Panel } from '@grafana/schema';
+import { type Panel } from '@grafana/schema';
 import { OptionFilter } from 'app/features/dashboard/components/PanelEditor/OptionsPaneOptions';
 import { getLastUsedDatasourceFromStorage } from 'app/features/dashboard/utils/dashboard';
 import { saveLibPanel } from 'app/features/library-panels/state/api';
+import { vizSuggestionsTracker } from 'app/features/panel/components/VizTypePicker/interactions';
 
-import { DashboardEditActionEvent } from '../edit-pane/shared';
 import { DashboardSceneChangeTracker } from '../saving/DashboardSceneChangeTracker';
-import { getPanelChanges } from '../saving/getDashboardChanges';
+import { type LibraryPanelBehavior } from '../scene/LibraryPanelBehavior';
 import { UNCONFIGURED_PANEL_PLUGIN_ID } from '../scene/UnconfiguredPanel';
 import { DashboardGridItem } from '../scene/layout-default/DashboardGridItem';
-import { DashboardLayoutItem, isDashboardLayoutItem } from '../scene/types/DashboardLayoutItem';
+import { type DashboardLayoutItem, isDashboardLayoutItem } from '../scene/types/DashboardLayoutItem';
 import { vizPanelToPanel } from '../serialization/transformSceneToSaveModel';
-import {
-  activateSceneObjectAndParentTree,
-  getDashboardSceneFor,
-  getLibraryPanelBehavior,
-  getPanelIdForVizPanel,
-} from '../utils/utils';
+import { DashboardEditActionEvent } from '../sidebar/events';
+import { SIDEBAR_COLLAPSED_KEY } from '../sidebar/shared';
+import { getDashboardSceneFor, getLibraryPanelBehavior, getPanelIdForVizPanel } from '../utils/utils';
 
 import { DataProviderSharer } from './PanelDataPane/DataProviderSharer';
-import { PanelDataPane } from './PanelDataPane/PanelDataPane';
-import { PanelDataPaneNext } from './PanelEditNext/PanelDataPaneNext';
+import { type PanelDataPane } from './PanelDataPane/PanelDataPane';
+import { createPanelDataPane } from './PanelDataPane/PanelDataPaneFactory';
+import { type PanelDataPaneNext } from './PanelEditNext/PanelDataPaneNext';
 import { PanelEditorRendererNext } from './PanelEditNext/PanelEditorRendererNext';
+import { QUERY_EDITOR_V2_PREFERENCE_KEY } from './PanelEditNext/constants';
+import { getLocalStorageWithTTL, setLocalStorageWithTTL } from './PanelEditNext/localStorageWithTTL';
+import { trackEditorVersionToggle } from './PanelEditNext/tracking';
 import { PanelEditorRenderer } from './PanelEditorRenderer';
 import { PanelOptionsPane } from './PanelOptionsPane';
 
@@ -52,7 +55,7 @@ export interface PanelEditorState extends SceneObjectState {
   showLibraryPanelSaveModal?: boolean;
   showLibraryPanelUnlinkModal?: boolean;
   tableView?: VizPanel;
-  pluginLoadErrror?: string;
+  pluginLoadError?: string;
   /**
    * Waiting for library panel or panel plugin to load
    */
@@ -73,6 +76,7 @@ export class PanelEditor extends SceneObjectBase<PanelEditorState> {
   private _layoutItem: DashboardLayoutItem;
   private _originalSaveModel!: Panel;
   private _changesHaveBeenMade = false;
+  private _tableViewPanelActivationAdded = false;
 
   public constructor(state: PanelEditorState) {
     super(state);
@@ -95,11 +99,13 @@ export class PanelEditor extends SceneObjectBase<PanelEditorState> {
 
     // Clear any panel selection when entering panel edit mode.
     // Need to clear selection here since selection is activated when panel edit mode is entered through the panel actions menu. This causes sidebar panel editor to be open when exiting panel edit mode
-    dashboard.state.editPane.clearSelection();
+    dashboard.state.sidebar.clearSelection();
 
-    // this will be deleted when suggestions is fully rolled out.
-    if (panel.state.pluginId === UNCONFIGURED_PANEL_PLUGIN_ID && !config.featureToggles.newVizSuggestions) {
-      panel.changePluginType('timeseries');
+    if (panel.state.pluginId === UNCONFIGURED_PANEL_PLUGIN_ID) {
+      const isPaneCollapsed = sessionStorage.getItem(SIDEBAR_COLLAPSED_KEY) === 'true';
+      if (isPaneCollapsed) {
+        panel.changePluginType('timeseries');
+      }
     }
 
     this._subs.add(
@@ -109,16 +115,20 @@ export class PanelEditor extends SceneObjectBase<PanelEditorState> {
       })
     );
 
-    const deactivateParents = activateSceneObjectAndParentTree(panel);
+    // Listen for panel plugin changes
+    this._subs.add(
+      panel.subscribeToState((n, p) => {
+        if (n.pluginId !== p.pluginId) {
+          this.waitForPlugin();
+        }
+      })
+    );
 
     this.waitForPlugin();
 
     return () => {
       this.commitChanges();
-
-      if (deactivateParents) {
-        deactivateParents();
-      }
+      reportInteraction('panel_edit_closed', {}, { silent: true });
     };
   }
 
@@ -152,13 +162,13 @@ export class PanelEditor extends SceneObjectBase<PanelEditorState> {
     });
 
     // sadly we cannot publish this event directly here as the main dashboard edit / undo system
-    // is not active while panel edit is active so we have to let the edit pane (which owns undo/redo)
+    // is not active while panel edit is active so we have to let the sidebar (which owns undo/redo)
     // publish this event when it activates
     const dashboard = getDashboardSceneFor(this);
-    dashboard.state.editPane.setPanelEditAction(editAction);
+    dashboard.state.sidebar.setPanelEditAction(editAction);
   }
 
-  private waitForPlugin(retry = 0) {
+  public waitForPlugin(retry = 0) {
     const panel = this.getPanel();
     const plugin = panel.getPlugin();
 
@@ -166,7 +176,7 @@ export class PanelEditor extends SceneObjectBase<PanelEditorState> {
       if (retry < 100) {
         setTimeout(() => this.waitForPlugin(retry + 1), retry * 10);
       } else {
-        this.setState({ pluginLoadErrror: 'Failed to load panel plugin' });
+        this.setState({ pluginLoadError: 'Failed to load panel plugin' });
       }
       return;
     }
@@ -192,8 +202,7 @@ export class PanelEditor extends SceneObjectBase<PanelEditorState> {
   private _setupChangeDetection() {
     const panel = this.state.panelRef.resolve();
     const performSaveModelDiff = () => {
-      const { hasChanges } = getPanelChanges(this._originalSaveModel, vizPanelToPanel(panel));
-      this.setState({ isDirty: hasChanges });
+      this.setState({ isDirty: !deepEqual(this._originalSaveModel, vizPanelToPanel(panel)) });
     };
 
     const performSaveModelDiffDebounced = this.debounceSaveModelDiff
@@ -223,32 +232,25 @@ export class PanelEditor extends SceneObjectBase<PanelEditorState> {
       this._setupChangeDetection();
       this._updateDataPane(plugin);
 
-      // Listen for panel plugin changes
-      this._subs.add(
-        panel.subscribeToState((n, p) => {
-          if (n.pluginId !== p.pluginId) {
-            this.waitForPlugin();
-          }
-        })
-      );
-
       // Setup options pane
       const optionsPane = new PanelOptionsPane({
         panelRef: this.state.panelRef,
         searchQuery: '',
         listMode: OptionFilter.All,
-        isVizPickerOpen: this.state.isNewPanel,
+        isVizPickerOpen: panel.state.pluginId === UNCONFIGURED_PANEL_PLUGIN_ID,
         isNewPanel: this.state.isNewPanel,
       });
 
-      this.setState({
-        optionsPane,
-        isInitializing: false,
-      });
+      this.setState({ optionsPane, isInitializing: false });
     } else {
       // plugin changed after first time initialization
       // Just update data pane
       this._updateDataPane(plugin);
+    }
+
+    // If switching plugin when tableView is enabled, then disable it
+    if (this.state.tableView) {
+      this.setState({ tableView: undefined });
     }
   }
 
@@ -263,7 +265,6 @@ export class PanelEditor extends SceneObjectBase<PanelEditorState> {
         this.setState({ dataPane: undefined });
       }
 
-      // clean up data provider when switching from data to non data panel
       if (panel.state.$data) {
         panel.setState({ $data: undefined });
       }
@@ -271,13 +272,11 @@ export class PanelEditor extends SceneObjectBase<PanelEditorState> {
 
     if (!skipDataQuery) {
       if (!this.state.dataPane) {
-        const dataPane = PanelDataPane.createFor(this.getPanel(), this.state.useQueryExperienceNext);
+        const dataPane = createPanelDataPane(this.getPanel(), this.state.useQueryExperienceNext);
         this.setState({ dataPane });
-        // This is to notify UrlSyncManager that a new object has been added to scene that requires url sync
         this.publishEvent(new NewSceneObjectAddedEvent(dataPane), true);
       }
 
-      // add data provider when switching from non data to data panel
       if (!panel.state.$data) {
         let ds = getLastUsedDatasourceFromStorage(getDashboardSceneFor(this).state.uid!)?.datasourceUid;
         if (!ds) {
@@ -317,12 +316,17 @@ export class PanelEditor extends SceneObjectBase<PanelEditorState> {
   }
 
   public onDiscard = () => {
+    reportInteraction('panel_edit_discarded', {}, { silent: true });
     this.setState({ isDirty: false });
 
     const panel = this.state.panelRef.resolve();
+    const dashboard = getDashboardSceneFor(this);
+
+    // clear pending suggestions
+    vizSuggestionsTracker.record(panel.state.key!, undefined);
 
     if (this.state.isNewPanel) {
-      getDashboardSceneFor(this).removePanel(panel);
+      dashboard.removePanel(panel);
     } else {
       // Revert any layout element changes
       this._layoutItem!.setState(this._layoutItemState!);
@@ -337,6 +341,10 @@ export class PanelEditor extends SceneObjectBase<PanelEditorState> {
 
     // Remember that we have done changes
     this._changesHaveBeenMade = true;
+  }
+
+  public getLibraryPanelBehavior(): LibraryPanelBehavior | undefined {
+    return getLibraryPanelBehavior(this.getPanel());
   }
 
   public onSaveLibraryPanel = () => {
@@ -384,6 +392,13 @@ export class PanelEditor extends SceneObjectBase<PanelEditorState> {
       return;
     }
 
+    // In order to maintain panel active state when switching to table view call activate here so that the panel is never deactivated
+    // This is to make sure panel state subscriptions remain activate from the queries pane
+    if (!this._tableViewPanelActivationAdded) {
+      this._subs.add(panel.activate());
+      this._tableViewPanelActivationAdded = true;
+    }
+
     this.setState({
       tableView: PanelBuilders.table()
         .setTitle('')
@@ -399,7 +414,10 @@ export class PanelEditor extends SceneObjectBase<PanelEditorState> {
    */
   public onToggleQueryEditorVersion = () => {
     const newUseQueryExperienceNext = !this.state.useQueryExperienceNext;
-    const dataPane = PanelDataPane.createFor(this.getPanel(), newUseQueryExperienceNext);
+    trackEditorVersionToggle(newUseQueryExperienceNext ? 'upgrade' : 'downgrade');
+    const dataPane = createPanelDataPane(this.getPanel(), newUseQueryExperienceNext);
+
+    setLocalStorageWithTTL(QUERY_EDITOR_V2_PREFERENCE_KEY, newUseQueryExperienceNext);
 
     this.setState({
       useQueryExperienceNext: newUseQueryExperienceNext,
@@ -412,8 +430,14 @@ export class PanelEditor extends SceneObjectBase<PanelEditorState> {
 }
 
 export function buildPanelEditScene(panel: VizPanel, isNewPanel = false): PanelEditor {
+  const isQueryEditorNextEnabled = getFeatureFlagClient().getBooleanValue(FlagKeys.QueryEditorNext, false);
+  const storedPreference = isQueryEditorNextEnabled
+    ? getLocalStorageWithTTL<boolean>(QUERY_EDITOR_V2_PREFERENCE_KEY)
+    : null;
+  const useQueryExperienceNext = storedPreference ?? isQueryEditorNextEnabled;
+
   return new PanelEditor({
-    useQueryExperienceNext: config.featureToggles.queryEditorNext,
+    useQueryExperienceNext,
     isInitializing: true,
     panelRef: panel.getRef(),
     isNewPanel,

@@ -26,7 +26,13 @@ const INPUT_DIR = "testdata/input"
 const OUTPUT_DIR = "testdata/output"
 const SINGLE_VERSION_OUTPUT_DIR = "testdata/output/single_version"
 const LATEST_VERSION_OUTPUT_DIR = "testdata/output/latest_version"
-const DEV_DASHBOARDS_INPUT_DIR = "../../../../devenv/dev-dashboards"
+
+// DEV_DASHBOARDS_INPUT_DIR points at the preserved v1 gdev dashboard corpus rather
+// than devenv/dev-dashboards. The provisioned devenv set is now v2-schema (no top-level
+// schemaVersion), so it can no longer exercise the v1->latest migration path. The corpus
+// is the original v1 set, preserved here so this test continues to cover the v1->latest
+// migration path over real dashboards.
+const DEV_DASHBOARDS_INPUT_DIR = "testdata/v1_dev_dashboards"
 const DEV_DASHBOARDS_OUTPUT_DIR = "testdata/dev-dashboards-output"
 
 func TestMigrate(t *testing.T) {
@@ -168,24 +174,18 @@ func testMigrationUnified(t *testing.T, dash map[string]interface{}, inputFileNa
 	outBytes, err := json.MarshalIndent(dash, "", "  ")
 	require.NoError(t, err, "failed to marshal migrated dashboard")
 
-	// 6. Check if output file already exists
-	if _, err := os.Stat(outPath); os.IsNotExist(err) {
-		// 7a. If no existing file, create a new one (ensure directory exists first)
-		outDir := filepath.Dir(outPath)
-		err = os.MkdirAll(outDir, 0750)
-		require.NoError(t, err, "failed to create output directory %s", outDir)
+	outDir := filepath.Dir(outPath)
+	//nolint:gosec
+	err = os.MkdirAll(outDir, 0755)
+	require.NoError(t, err, "failed to create output directory %s", outDir)
 
-		err = os.WriteFile(outPath, outBytes, 0644)
-		require.NoError(t, err, "failed to write new output file %s", outPath)
-		return
-	}
+	err = os.WriteFile(outPath, outBytes, 0644)
+	require.NoError(t, err, "failed to write output file %s", outPath)
 
-	// 7b. If existing file exists, compare them and fail if different
-	// We can ignore gosec G304 here since it's a test
-	// nolint:gosec
-	existingBytes, err := os.ReadFile(outPath)
-	require.NoError(t, err, "failed to read existing output file %s", outPath)
-	require.JSONEq(t, string(existingBytes), string(outBytes), "output file %s did not match expected result", outPath)
+	key, err := migrationtestutil.ChecksumKey("testdata", outPath)
+	require.NoError(t, err)
+
+	goldenChecksums.ValidateOrUpdate(t, key, outBytes)
 }
 
 func getSchemaVersion(t *testing.T, dash map[string]interface{}) int {
@@ -444,12 +444,32 @@ func runDevDashboardMigrationTests(t *testing.T, targetVersion int, outputDir st
 
 		// Load a fresh copy of the dashboard for this test (ensures no object sharing)
 		inputDash := loadDashboard(t, jsonFile)
-		inputVersion := getSchemaVersion(t, inputDash)
+		inputVersion, ok := getSchemaVersionIfPresent(inputDash)
+		if !ok {
+			t.Logf("Skipping %s: dashboard missing schemaVersion (likely non-legacy dashboard format)", relativeOutputPath)
+			continue
+		}
 
 		testName := fmt.Sprintf("%s v%d to v%d", relativeOutputPath, inputVersion, targetVersion)
 		t.Run(testName, func(t *testing.T) {
 			testMigrationUnified(t, inputDash, relativeOutputPath, inputVersion, targetVersion, outputDir)
 		})
+	}
+}
+
+func getSchemaVersionIfPresent(dash map[string]interface{}) (int, bool) {
+	version, ok := dash["schemaVersion"]
+	if !ok {
+		return 0, false
+	}
+
+	switch v := version.(type) {
+	case int:
+		return v, true
+	case float64:
+		return int(v), true
+	default:
+		return 0, false
 	}
 }
 

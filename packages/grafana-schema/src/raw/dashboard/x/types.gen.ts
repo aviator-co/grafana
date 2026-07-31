@@ -151,6 +151,10 @@ export interface VariableModel {
    */
   description?: string;
   /**
+   * Whether the group-by operator is enabled in the ad hoc filter combobox.
+   */
+  enableGroupBy?: boolean;
+  /**
    * Visibility configuration for the variable
    */
   hide?: VariableHide;
@@ -219,6 +223,7 @@ export interface VariableModel {
 
 export const defaultVariableModel: Partial<VariableModel> = {
   allowCustomValue: true,
+  enableGroupBy: false,
   includeAll: false,
   multi: false,
   options: [],
@@ -337,6 +342,16 @@ export interface DashboardLink {
    * If true, includes current time range in the link as query params
    */
   keepTime: boolean;
+  /**
+   * The source that registered the link (if any)
+   */
+  origin?: {
+    type: 'datasource';
+    /**
+     * The plugin type-id
+     */
+    group: string;
+  };
   /**
    * Placement can be used to display the link somewhere else on the dashboard other than above the visualisations.
    */
@@ -605,6 +620,10 @@ export interface Threshold {
    * Nulls currently appear here when serializing -Infinity to JSON.
    */
   value: (number | null);
+  /**
+   * Optional dashboard-variable expression (e.g. `$myVar`) resolved at render time; `value` is the numeric fallback when the expression cannot be resolved to a single finite number.
+   */
+  valueExpr?: string;
 }
 
 /**
@@ -1022,6 +1041,8 @@ export interface LibraryPanelRef {
   uid: string;
 }
 
+export type MatcherScope = ('series' | 'nested' | 'annotation' | 'exemplar');
+
 /**
  * Matcher is a predicate configuration. Based on the config a set of field(s) or values is filtered in order to apply override / transformation.
  * It comes with in id ( to resolve implementation from registry) and a configuration that’s specific to a particular matcher type.
@@ -1035,6 +1056,10 @@ export interface MatcherConfig {
    * The matcher options. This is specific to the matcher implementation.
    */
   options?: unknown;
+  /**
+   * If set, limits this matcher to fields of that type. If not set, "series" mode is used.
+   */
+  scope?: MatcherScope;
 }
 
 export const defaultMatcherConfig: Partial<MatcherConfig> = {
@@ -1207,7 +1232,7 @@ export interface Dashboard {
   /**
    * ID of a dashboard imported from the https://grafana.com/grafana/dashboards/ portal
    */
-  gnetId?: string;
+  gnetId?: number;
   /**
    * Configuration of dashboard cursor sync behavior.
    * Accepted values are 0 (sync turned off), 1 (shared crosshair), 2 (shared crosshair and tooltip).
