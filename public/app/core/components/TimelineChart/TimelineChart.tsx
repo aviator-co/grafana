@@ -86,13 +86,16 @@ export const TimelineChart = (props: TimelineProps) => {
       }
 
       return (
-        <VizLayout.Legend placement={legend.placement}>
+        <VizLayout.Legend placement={legend.placement} width={legend.width}>
           <VizLegend
             placement={legend.placement}
             items={legendItems}
             displayMode={legend.displayMode}
+            sortBy={legend.sortBy}
+            sortDesc={legend.sortDesc}
             overflow={legend.overflow}
             readonly
+            isSortable={true}
           />
         </VizLayout.Legend>
       );
