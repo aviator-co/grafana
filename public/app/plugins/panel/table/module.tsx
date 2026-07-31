@@ -10,7 +10,7 @@ import { addTableCustomConfig } from 'app/features/panel/table/addTableCustomCon
 import { addTableCustomPanelOptions } from 'app/features/panel/table/addTableCustomPanelOptions';
 
 import { TableCellOptionEditor } from './TableCellOptionEditor';
-import { TablePanel } from './TablePanel';
+import { TablePieView } from './TablePieView';
 import { tableMigrationHandler, tablePanelChangedHandler } from './migrations';
 import { type FieldConfig, type Options } from './panelcfg.gen';
 import { tableSuggestionsSupplier } from './suggestions';
@@ -19,7 +19,7 @@ function getTableNoValuePlaceholder(): string {
   return t('table.no-value-placeholder', 'No rows');
 }
 
-export const plugin = new PanelPlugin<Options, FieldConfig>(TablePanel)
+export const plugin = new PanelPlugin<Options, FieldConfig>(TablePieView)
   .setPanelChangeHandler(tablePanelChangedHandler)
   .setMigrationHandler(tableMigrationHandler)
   .useFieldConfig({

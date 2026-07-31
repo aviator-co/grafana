@@ -544,6 +544,7 @@ const getContentStyle = (
 
 const getStyles = (theme: GrafanaTheme2) => {
   const { background, borderColor } = theme.components.panel;
+  const accentStripe = `linear-gradient(90deg, ${theme.colors.primary.main} 0%, ${theme.colors.error.main} 100%)`;
 
   return {
     container: css({
@@ -553,7 +554,17 @@ const getStyles = (theme: GrafanaTheme2) => {
     panel: css({
       label: 'panel-container',
       backgroundColor: background,
-      border: `1px solid ${borderColor}`,
+      // Painted as a background layer rather than a pseudo-element: the panel is
+      // `position: unset`, so an absolutely positioned child would resolve against the
+      // wrong ancestor. As a background it is clipped by the existing border radius.
+      backgroundImage: accentStripe,
+      backgroundRepeat: 'no-repeat',
+      backgroundSize: '100% 6px',
+      // Reserve the stripe's height above the header. The header is the first flow
+      // child and paints its own background, which would otherwise cover the stripe.
+      paddingTop: '6px',
+      border: `2px solid ${theme.colors.primary.border}`,
+      boxShadow: theme.shadows.z2,
       position: 'unset',
       borderRadius: theme.shape.radius.lg,
       height: '100%',
@@ -594,6 +605,9 @@ const getStyles = (theme: GrafanaTheme2) => {
     panelTransparent: css({
       label: 'panel-transparent-container',
       backgroundColor: 'transparent',
+      // Transparent panels opt out of the accent stripe and shadow entirely.
+      backgroundImage: 'none',
+      boxShadow: 'none',
       border: '1px solid transparent',
       boxSizing: 'border-box',
       '&:hover': {
@@ -637,6 +651,8 @@ const getStyles = (theme: GrafanaTheme2) => {
       padding: theme.spacing(1, 1, 0, 1),
       gap: theme.spacing(1),
       maxHeight: theme.spacing.gridSize * theme.components.panel.headerHeight,
+      background: theme.colors.background.secondary,
+      borderBottom: `1px solid ${theme.colors.primary.border}`,
     }),
     subHeader: css({
       label: 'panel-sub-header',
@@ -667,6 +683,10 @@ const getStyles = (theme: GrafanaTheme2) => {
       display: 'flex',
       minWidth: 0,
       paddingLeft: theme.spacing.x0_5,
+      textTransform: 'uppercase',
+      letterSpacing: '0.08em',
+      color: theme.colors.primary.text,
+      fontWeight: theme.typography.fontWeightBold,
       '& > h2': {
         minWidth: 0,
       },

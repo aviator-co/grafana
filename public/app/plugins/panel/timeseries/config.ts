@@ -29,9 +29,11 @@ import { ThresholdsStyleEditor } from './ThresholdsStyleEditor';
 export const defaultGraphConfig: GraphFieldConfig = {
   drawStyle: GraphDrawStyle.Line,
   lineInterpolation: LineInterpolation.Linear,
-  lineWidth: 1,
-  fillOpacity: 0,
-  gradientMode: GraphGradientMode.None,
+  lineWidth: 3,
+  fillOpacity: 45,
+  // Opacity derives the gradient from the series colour. Scheme cannot be the default:
+  // it requires thresholds, which a panel with no fieldConfig does not have, and throws.
+  gradientMode: GraphGradientMode.Opacity,
   barAlignment: BarAlignment.Center,
   barWidthFactor: 0.6,
   stacking: {
