@@ -191,7 +191,7 @@
     "rollup-plugin-node-externals": "^8.0.0",
     "rollup-plugin-svg-import": "3.0.0",
     "sass-loader": "16.0.5",
-    "storybook": "10.3.6",
+    "storybook": "10.6.2",
     "style-loader": "4.0.0",
     "typescript": "npm:@typescript/typescript6@^6.0.2",
     "webpack": "^5.105.0"
